@@ -9,8 +9,62 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  validate:
     runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Lua 5.3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.3
+
+      - name: Verify tag matches VERSION
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="$(tr -d '\r\n' < VERSION)"
+          EXPECTED_TAG="v${VERSION}"
+
+          echo "VERSION:      ${VERSION}"
+          echo "Git tag:      ${GITHUB_REF_NAME}"
+          echo "Expected tag: ${EXPECTED_TAG}"
+
+          if [ "${GITHUB_REF_NAME}" != "${EXPECTED_TAG}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match VERSION ${VERSION}"
+            exit 1
+          fi
+
+      - name: Check Lua syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          while IFS= read -r -d '' file; do
+            echo "Checking $file"
+            luac5.3 -p "$file"
+          done < <(find . -type f -name '*.lua' -print0)
+
+      - name: Reject hardcoded runtime versions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if grep -RInE \
+            'PROGRAM_VERSION[[:space:]]*=[[:space:]]*["'\''][0-9]' \
+            src
+          then
+            echo "::error::Runtime version must come from VERSION"
+            exit 1
+          fi
+
+  release:
+    needs: validate
+    runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
