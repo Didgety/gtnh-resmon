@@ -1,0 +1,32 @@
+name: Release OpenComputers package
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build OpenComputers release archive
+        run: |
+          tar -cvf GTNHResourceMonitor.tar \
+            setup.lua \
+            VERSION \
+            src
+
+      - name: Create GitHub Release and upload archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            GTNHResourceMonitor.tar \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes
