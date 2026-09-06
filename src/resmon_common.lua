@@ -71,7 +71,7 @@ local DEFAULT = {
     -- Routine daemon output can overwrite an interactive OpenOS shell because
     -- rc services inherit a terminal. Set this false when using dashboard
     -- screens; errors are still reflected on configured dashboards.
-    consoleLog = true,
+    consoleLog = false,
 
     discord = {
       enabled = false,
@@ -261,7 +261,7 @@ local SETTINGS_FIELDS = {
   siteName = true, webhookName = true, meAddress = true, pollInterval = true,
   trendWindow = true, minTrendSpan = true,
   configReloadInterval = true, reportOnStart = true,
-  httpTimeout = true, consoleLog = false,
+  httpTimeout = true, consoleLog = true,
 }
 
 local DISCORD_FIELDS = {
