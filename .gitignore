@@ -1,0 +1,6 @@
+.DS_Store
+Thumbs.db
+*.zip
+*.bak
+*.tmp
+*.resmon-install-tmp
