@@ -7,7 +7,7 @@ local unicode = require("unicode")
 local common = require("resmon_common")
 
 local STATE_PATH = "/var/lib/resmon.state"
-local PROGRAM_VERSION = "2.6.0"
+local PROGRAM_VERSION = common.getVersion()
 
 ----------------------------------------------------------------------
 -- Small JSON implementation (enough for Discord's REST API)
