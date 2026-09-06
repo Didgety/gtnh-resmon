@@ -18,19 +18,19 @@ An OpenComputers/OpenOS daemon for **GregTech: New Horizons** that monitors sele
 ## Recommended installation: Pastebin bootstrap
 
 ```sh
-pastebin run f6Wvf4sY --enable --start
+pastebin run PrHfkG7N --enable --start
 ```
 
 Update an existing installation to the latest GitHub Release and restart it:
 
 ```sh
-pastebin run f6Wvf4sY update --restart
+pastebin run PrHfkG7N update --restart
 ```
 
 Install a specific release:
 
 ```sh
-pastebin run f6Wvf4sY --tag=v2.2.0
+pastebin run PrHfkG7N --tag=v2.4.0
 ```
 
 The Pastebin code is deliberately tiny. It downloads the current `installer.lua` from the
