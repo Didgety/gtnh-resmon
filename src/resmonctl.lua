@@ -13,6 +13,11 @@ if #args == 0 then
   return
 end
 
+if args[1] == "version" or args[1] == "--version" then
+  print("GTNH Resource Monitor " .. common.getVersion())
+  return
+end
+
 if args[1] == "init" then
   if fs.exists(common.CONFIG_PATH) then
     io.stderr:write("Config already exists: ", common.CONFIG_PATH, "\n")
