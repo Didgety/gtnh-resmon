@@ -7,6 +7,7 @@ local unicode = require("unicode")
 local common = require("resmon_common")
 
 local STATE_PATH = "/var/lib/resmon.state"
+local PROGRAM_VERSION = "2.6.0"
 
 ----------------------------------------------------------------------
 -- Small JSON implementation (enough for Discord's REST API)
@@ -295,7 +296,7 @@ local me = getME()
 
 local function httpRequest(method, url, body, headers)
   headers = headers or {}
-  headers["User-Agent"] = headers["User-Agent"] or "GTNH-OC-ResourceMonitor/2.0"
+  headers["User-Agent"] = headers["User-Agent"] or "GTNH-OC-ResourceMonitor/" .. PROGRAM_VERSION
 
   local handle, reason
   if method == "GET" then
@@ -346,16 +347,37 @@ local function httpRequest(method, url, body, headers)
   }
 end
 
-local function sendWebhook(url, content)
+local function sendWebhookPayload(url, payloadTable)
   if not url or url == "" then return nil, "Webhook is not configured" end
-  local payload = json.encode({
-    username = cfg.settings.webhookName or "GTNH Resource Monitor",
-    content = content,
-  })
+  payloadTable = payloadTable or {}
+  if payloadTable.username == nil then
+    payloadTable.username = cfg.settings.webhookName or "GTNH Resource Monitor"
+  end
+  local payload = json.encode(payloadTable)
   local res, err = httpRequest("POST", url, payload, { ["Content-Type"] = "application/json" })
   if not res then return nil, err end
   if res.code and res.code >= 200 and res.code < 300 then return true end
   return nil, "Discord webhook HTTP " .. tostring(res.code) .. ": " .. tostring(res.body)
+end
+
+local function sendWebhook(url, content)
+  return sendWebhookPayload(url, { content = content })
+end
+
+local function sendWebhookEmbeds(url, content, embeds)
+  embeds = embeds or {}
+  if #embeds == 0 then return sendWebhook(url, content or "") end
+
+  -- Discord allows multiple embeds per webhook message, but the aggregate
+  -- embed character budget is 6000. Sending one bounded embed per request is
+  -- simple and avoids a large resource group crossing that shared limit.
+  for i, embed in ipairs(embeds) do
+    local payload = { embeds = { embed } }
+    if i == 1 and content and content ~= "" then payload.content = content end
+    local ok, err = sendWebhookPayload(url, payload)
+    if not ok then return nil, err end
+  end
+  return true
 end
 
 local function sendWebhookChunked(url, content)
@@ -533,6 +555,217 @@ local function resourceLine(row, now)
   end
 
   return table.concat(pieces, " ")
+end
+
+
+-- Discord embed helpers -------------------------------------------------------
+
+local EMBED_COLOR_OK = 0x57F287
+local EMBED_COLOR_LOW = 0xED4245
+local EMBED_COLOR_WARN = 0xFEE75C
+local EMBED_COLOR_INFO = 0x5865F2
+
+local function discordTruncate(value, maxChars)
+  value = tostring(value or "")
+  maxChars = tonumber(maxChars) or 0
+  local len = unicode.len(value) or #value
+  if len <= maxChars then return value end
+  if maxChars <= 1 then return unicode.sub(value, 1, maxChars) end
+  return unicode.sub(value, 1, maxChars - 1) .. "…"
+end
+
+local function progressBar(percent, width)
+  if percent == nil then return nil end
+  width = math.max(5, math.min(30, math.floor(tonumber(width) or 12)))
+  local clamped = math.max(0, math.min(100, tonumber(percent) or 0))
+  local filled = math.floor((clamped / 100) * width + 0.5)
+  return "`" .. string.rep("█", filled) .. string.rep("░", width - filled) .. "`"
+end
+
+local function resourceEmbedField(row, now, group)
+  local r = row.resource
+  local name = discordTruncate(displayName(r), 220)
+
+  if row.error or row.amount == nil then
+    return {
+      name = "⚠️ " .. name,
+      value = discordTruncate("Query error: `" .. tostring(row.error or "unknown error") .. "`", 1024),
+      inline = false,
+    }
+  end
+
+  local m = metricsFor(row, now)
+  local low = r.min ~= nil and row.amount < tonumber(r.min)
+  local lines = {}
+  local amountText = "**" .. humanNumber(row.amount) .. unit(r) .. "**"
+
+  if m.target and m.percent then
+    amountText = amountText .. " / " .. humanNumber(m.target) .. unit(r) ..
+      "  •  **" .. string.format("%.1f", m.percent) .. "%**"
+  end
+  lines[#lines + 1] = amountText
+
+  if group.progressBar == true and m.percent then
+    local bar = progressBar(m.percent, group.progressWidth)
+    if bar then lines[#lines + 1] = bar .. "  " .. string.format("%.1f%%", m.percent) end
+  end
+
+  if m.rateHour then
+    local sign = m.rateHour >= 0 and "+" or ""
+    local trend = "Trend: **" .. sign .. humanNumber(m.rateHour) .. unit(r) .. "/h**"
+    if m.percentHour then trend = trend .. "  (" .. string.format("%+.1f", m.percentHour) .. "%/h)" end
+    lines[#lines + 1] = trend
+    if m.eta then lines[#lines + 1] = "Depletion ETA: **~" .. humanDuration(m.eta) .. "**" end
+  else
+    lines[#lines + 1] = "_Trend warming up_"
+  end
+
+  return {
+    name = (low and "🔴 " or "🟢 ") .. name,
+    value = discordTruncate(table.concat(lines, "\n"), 1024),
+    inline = false,
+  }
+end
+
+local function embedCharCount(embed)
+  local total = 0
+  total = total + (unicode.len(tostring(embed.title or "")) or 0)
+  total = total + (unicode.len(tostring(embed.description or "")) or 0)
+  if embed.footer then total = total + (unicode.len(tostring(embed.footer.text or "")) or 0) end
+  for _, field in ipairs(embed.fields or {}) do
+    total = total + (unicode.len(tostring(field.name or "")) or 0)
+    total = total + (unicode.len(tostring(field.value or "")) or 0)
+  end
+  return total
+end
+
+local function reportSummary(rows)
+  local low, errors = 0, 0
+  for _, row in ipairs(rows or {}) do
+    if row.error or row.amount == nil then
+      errors = errors + 1
+    elseif row.resource.min ~= nil and row.amount < tonumber(row.resource.min) then
+      low = low + 1
+    end
+  end
+  return low, errors
+end
+
+local function buildGroupReportEmbeds(groupId, rows, now)
+  local g = cfg.groups[groupId]
+  local site = tostring(cfg.settings.siteName or "GTNH")
+  local groupName = tostring(g.display or groupId)
+  local low, errors = reportSummary(rows)
+  local color = low > 0 and EMBED_COLOR_LOW or (errors > 0 and EMBED_COLOR_WARN or EMBED_COLOR_OK)
+  local summary = tostring(#rows) .. " resource" .. (#rows == 1 and "" or "s") ..
+    " • " .. tostring(low) .. " low • " .. tostring(errors) .. " error" .. (errors == 1 and "" or "s")
+
+  if #rows == 0 then
+    return {{
+      title = discordTruncate(site .. " — " .. groupName, 256),
+      description = "_(no monitored resources in this group)_",
+      color = EMBED_COLOR_INFO,
+      footer = { text = "GTNH Resource Monitor v" .. PROGRAM_VERSION },
+    }}
+  end
+
+  local embeds = {}
+  local current = nil
+
+  local function newEmbed()
+    current = {
+      title = discordTruncate(site .. " — " .. groupName, 256),
+      description = (#embeds == 0) and summary or nil,
+      color = color,
+      fields = {},
+    }
+    embeds[#embeds + 1] = current
+  end
+
+  newEmbed()
+  for _, row in ipairs(rows) do
+    local field = resourceEmbedField(row, now, g)
+    current.fields[#current.fields + 1] = field
+
+    -- Discord permits 25 fields and 6000 total embed characters. Keep a
+    -- little headroom for the page footer and any future formatting changes.
+    if #current.fields > 25 or embedCharCount(current) > 5600 then
+      table.remove(current.fields)
+      newEmbed()
+      current.fields[#current.fields + 1] = field
+    end
+  end
+
+  for i, embed in ipairs(embeds) do
+    embed.footer = {
+      text = "GTNH Resource Monitor v" .. PROGRAM_VERSION .. " • page " .. tostring(i) .. "/" .. tostring(#embeds)
+    }
+  end
+  return embeds
+end
+
+local function alertEventField(event, now, group)
+  local row = event.row
+  local r = row.resource
+  local m = metricsFor(row, now)
+  local icon = event.kind == "RECOVERED" and "✅" or "🚨"
+  local lines = { "**" .. humanNumber(row.amount) .. unit(r) .. "**" }
+
+  if m.target and m.percent then
+    lines[1] = lines[1] .. " / " .. humanNumber(m.target) .. unit(r) ..
+      "  •  **" .. string.format("%.1f", m.percent) .. "%**"
+  end
+  if group.progressBar == true and m.percent then
+    lines[#lines + 1] = progressBar(m.percent, group.progressWidth) .. "  " .. string.format("%.1f%%", m.percent)
+  end
+  if m.rateHour then
+    local sign = m.rateHour >= 0 and "+" or ""
+    lines[#lines + 1] = "Trend: **" .. sign .. humanNumber(m.rateHour) .. unit(r) .. "/h**"
+    if m.eta then lines[#lines + 1] = "Depletion ETA: **~" .. humanDuration(m.eta) .. "**" end
+  end
+
+  return {
+    name = icon .. " " .. event.kind .. " — " .. discordTruncate(displayName(r), 190),
+    value = discordTruncate(table.concat(lines, "\n"), 1024),
+    inline = false,
+  }
+end
+
+local function buildAlertEmbeds(groupId, events, now)
+  local g = cfg.groups[groupId]
+  local site = tostring(cfg.settings.siteName or "GTNH")
+  local groupName = tostring(g.display or groupId)
+  local hasLow = false
+  for _, event in ipairs(events or {}) do
+    if event.kind ~= "RECOVERED" then hasLow = true break end
+  end
+
+  local embeds = {}
+  local current = nil
+  local function newEmbed()
+    current = {
+      title = discordTruncate(site .. " — " .. groupName .. " Alert", 256),
+      color = hasLow and EMBED_COLOR_LOW or EMBED_COLOR_OK,
+      fields = {},
+    }
+    embeds[#embeds + 1] = current
+  end
+
+  newEmbed()
+  for _, event in ipairs(events or {}) do
+    local field = alertEventField(event, now, g)
+    current.fields[#current.fields + 1] = field
+    if #current.fields > 25 or embedCharCount(current) > 5600 then
+      table.remove(current.fields)
+      newEmbed()
+      current.fields[#current.fields + 1] = field
+    end
+  end
+
+  for i, embed in ipairs(embeds) do
+    embed.footer = { text = "GTNH Resource Monitor v" .. PROGRAM_VERSION .. " • alert " .. tostring(i) .. "/" .. tostring(#embeds) }
+  end
+  return embeds
 end
 
 ----------------------------------------------------------------------
@@ -888,13 +1121,18 @@ local function sendGroupReport(groupId, snapshot, now)
   local g = cfg.groups[groupId]
   if not g then return nil, "Unknown group " .. tostring(groupId) end
   local rows = rowsForGroup(snapshot, groupId)
-  local lines = {
-    "**" .. tostring(cfg.settings.siteName or "GTNH") .. " — " .. tostring(g.display or groupId) .. "**",
-    ""
-  }
-  if #rows == 0 then lines[#lines + 1] = "_(no monitored resources in this group)_" end
-  for _, row in ipairs(rows) do lines[#lines + 1] = resourceLine(row, now) end
-  return sendWebhookChunked(g.webhook, table.concat(lines, "\n"))
+
+  if tostring(g.reportStyle or "embed"):lower() == "text" then
+    local lines = {
+      "**" .. tostring(cfg.settings.siteName or "GTNH") .. " — " .. tostring(g.display or groupId) .. "**",
+      ""
+    }
+    if #rows == 0 then lines[#lines + 1] = "_(no monitored resources in this group)_" end
+    for _, row in ipairs(rows) do lines[#lines + 1] = resourceLine(row, now) end
+    return sendWebhookChunked(g.webhook, table.concat(lines, "\n"))
+  end
+
+  return sendWebhookEmbeds(g.webhook, nil, buildGroupReportEmbeds(groupId, rows, now))
 end
 
 local function processAlerts(snapshot, now)
@@ -922,17 +1160,10 @@ local function processAlerts(snapshot, now)
       end
 
       if eventType then
-        perGroup[r.group] = perGroup[r.group] or { lines = {}, ping = false }
+        perGroup[r.group] = perGroup[r.group] or { events = {}, ping = false }
         local bucket = perGroup[r.group]
         if eventType ~= "RECOVERED" then bucket.ping = true end
-        local m = metricsFor(row, now)
-        local line = (eventType == "RECOVERED" and "✅" or "🚨") .. " **" .. eventType .. " — " .. displayName(r) .. ":** " .. humanNumber(row.amount) .. unit(r)
-        if m.percent then line = line .. " (" .. string.format("%.1f", m.percent) .. "%)" end
-        if m.rateHour then
-          line = line .. " | " .. string.format("%+.2f", m.rateHour) .. unit(r) .. "/h"
-          if m.eta then line = line .. " | depletion ~" .. humanDuration(m.eta) end
-        end
-        bucket.lines[#bucket.lines + 1] = line
+        bucket.events[#bucket.events + 1] = { kind = eventType, row = row }
       end
     end
   end
@@ -941,10 +1172,30 @@ local function processAlerts(snapshot, now)
     local g = cfg.groups[groupId]
     if g then
       local webhook = (g.alertWebhook and g.alertWebhook ~= "") and g.alertWebhook or g.webhook
-      local lines = { "**" .. tostring(cfg.settings.siteName or "GTNH") .. " — " .. tostring(g.display or groupId) .. " Alert**" }
-      if bucket.ping and g.mention and g.mention ~= "" then table.insert(lines, 1, g.mention) end
-      for _, line in ipairs(bucket.lines) do lines[#lines + 1] = line end
-      local ok, err = sendWebhookChunked(webhook, table.concat(lines, "\n"))
+      local mention = bucket.ping and g.mention and g.mention ~= "" and g.mention or nil
+      local ok, err
+
+      if tostring(g.reportStyle or "embed"):lower() == "text" then
+        local lines = { "**" .. tostring(cfg.settings.siteName or "GTNH") .. " — " .. tostring(g.display or groupId) .. " Alert**" }
+        if mention then table.insert(lines, 1, mention) end
+
+        for _, event in ipairs(bucket.events) do
+          local row, r = event.row, event.row.resource
+          local m = metricsFor(row, now)
+          local line = (event.kind == "RECOVERED" and "✅" or "🚨") ..
+            " **" .. event.kind .. " — " .. displayName(r) .. ":** " .. humanNumber(row.amount) .. unit(r)
+          if m.percent then line = line .. " (" .. string.format("%.1f", m.percent) .. "%)" end
+          if m.rateHour then
+            line = line .. " | " .. string.format("%+.2f", m.rateHour) .. unit(r) .. "/h"
+            if m.eta then line = line .. " | depletion ~" .. humanDuration(m.eta) end
+          end
+          lines[#lines + 1] = line
+        end
+        ok, err = sendWebhookChunked(webhook, table.concat(lines, "\n"))
+      else
+        ok, err = sendWebhookEmbeds(webhook, mention, buildAlertEmbeds(groupId, bucket.events, now))
+      end
+
       if not ok then errorLog("Alert send failed for ", groupId, ": ", tostring(err)) end
     end
   end
@@ -1121,7 +1372,7 @@ local function checkTerminalReportRequest(now)
   sendRequestedReports((which and which ~= "") and which or "*", now)
 end
 
-infoLog("GTNH Resource Monitor v2")
+infoLog("GTNH Resource Monitor v" .. PROGRAM_VERSION)
 infoLog("Config: ", common.CONFIG_PATH)
 infoLog("Ctrl+C to stop. resmonctl changes hot-reload automatically.")
 

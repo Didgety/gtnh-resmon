@@ -66,6 +66,14 @@ local DEFAULT = {
       reportInterval = 30 * 60,
       alertRepeatInterval = 2 * 60 * 60,
       mention = "",
+
+      -- Discord formatting. Embeds are the default in 2.6.0; set
+      -- reportStyle=text to retain the legacy plain-text reports.
+      reportStyle = "embed",
+
+      -- Optional percentage bar based on target (or min when target is unset).
+      progressBar = false,
+      progressWidth = 12,
     },
   },
 
@@ -154,12 +162,14 @@ local NUMERIC_KEYS = {
   min = true, recover = true, target = true, damage = true,
   reportInterval = true, alertRepeatInterval = true,
   pollInterval = true, trendWindow = true, minTrendSpan = true,
+  progressWidth = true,
   configReloadInterval = true, httpTimeout = true,
   pageInterval = true,
 }
 
 local BOOLEAN_KEYS = {
   enabled = true, reportOnStart = true, consoleLog = true,
+  progressBar = true,
 }
 
 local function coerce(key, value)
@@ -212,6 +222,7 @@ local RESOURCE_FIELDS = {
 local GROUP_FIELDS = {
   display = true, webhook = true, alertWebhook = true,
   reportInterval = true, alertRepeatInterval = true, mention = true,
+  reportStyle = true, progressBar = true, progressWidth = true,
 }
 
 local SCREEN_FIELDS = {
@@ -275,8 +286,10 @@ local function listText(cfg)
   for _, id in ipairs(groupNames) do
     local g = cfg.groups[id]
     table.insert(lines, string.format(
-      "  %s (%s) report=%ss webhook=%s alertWebhook=%s",
+      "  %s (%s) report=%ss style=%s bar=%s webhook=%s alertWebhook=%s",
       id, g.display or id, tostring(g.reportInterval or "default"),
+      tostring(g.reportStyle or "embed"),
+      tostring(g.progressBar == true),
       (g.webhook and g.webhook ~= "") and "set" or "missing",
       (g.alertWebhook and g.alertWebhook ~= "") and "set" or "same"
     ))
@@ -332,7 +345,8 @@ function M.helpText(prefix)
     "",
     "Discovery prints exact name/damage matchers; item fuzzy search streams results to avoid OC OOM.",
     "Resource fields: display,label,name,damage,min,recover,target,unit,group,trendWindow,minTrendSpan",
-    "Group fields: display,webhook,alertWebhook,reportInterval,alertRepeatInterval,mention",
+    "Group fields: display,webhook,alertWebhook,reportInterval,alertRepeatInterval,mention,reportStyle,progressBar,progressWidth",
+    "Discord reports default to reportStyle=embed; use progressBar=true for an optional target bar.",
     "Screen fields: screen,gpu,group,title,enabled,pageInterval",
     "Use a dedicated GPU for dashboards so the monitor never rebinds the interactive terminal GPU.",
     "Use field=nil to clear an optional field.",
@@ -462,7 +476,11 @@ function M.applyCommand(cfg, tokens)
       if cfg.groups[id] then return false, "Group already exists: " .. id, false end
       local kv, err = parseKV(tokens, 4)
       if not kv then return false, err, false end
-      local g = { display = id, webhook = "", alertWebhook = "", reportInterval = 1800, alertRepeatInterval = 7200, mention = "" }
+      local g = {
+        display = id, webhook = "", alertWebhook = "",
+        reportInterval = 1800, alertRepeatInterval = 7200, mention = "",
+        reportStyle = "embed", progressBar = false, progressWidth = 12,
+      }
       local ok, applyErr = applyKV(g, kv, GROUP_FIELDS)
       if not ok then return false, applyErr, false end
       cfg.groups[id] = g
