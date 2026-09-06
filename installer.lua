@@ -16,9 +16,7 @@ local shell = require("shell")
 local args, options = shell.parse(...)
 local action = args[1] or "install"
 
--- IMPORTANT: replace this before publishing the repository / Pastebin script.
--- It can also be overridden at runtime with --repo=owner/repository.
-local DEFAULT_REPOSITORY = "YOUR_GITHUB_USERNAME/gtnh-oc-resource-monitor"
+local DEFAULT_REPOSITORY = "Didgety/gtnh-resmon"
 local ARCHIVE_NAME = "GTNHResourceMonitor.tar"
 
 local TAR_URL = "https://raw.githubusercontent.com/Navatusein/GTNH-OC-Installer/refs/heads/main/tar/tar.lua"
