@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.2.0 - network/Pastebin installer
+
+- Added a permanent Pastebin bootstrap that forwards to the current GitHub installer.
+- Added a network installer that downloads tagged/latest GitHub Release archives.
+- Added GitHub Actions release packaging (`GTNHResourceMonitor.tar`).
+- Network install/update delegates to the existing OpenOS `setup.lua`, preserving config/state.
+
 ## 2.1.0
 
 - Added `setup.lua` installer/updater/uninstaller.
