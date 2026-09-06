@@ -11,7 +11,7 @@ local shell = require("shell")
 
 local REPOSITORY = "Didgety/gtnh-resmon"
 
-if REPOSITORY:find("YOUR_GITHUB_USERNAME", 1, true) then
+if REPOSITORY:find("Didgety", 1, true) then
   io.stderr:write("Pastebin bootstrap: configure REPOSITORY before publishing this paste.\n")
   return 1
 end
