@@ -280,7 +280,7 @@ function M.helpText(prefix)
     p .. "discord-admin remove <userId>",
     p .. "report [group]",
     "",
-    "Discovery searches the live AE network and prints exact name/damage matchers.",
+    "Discovery prints exact name/damage matchers; item fuzzy search streams results to avoid OC OOM.",
     "Resource fields: display,label,name,damage,min,recover,target,unit,group,trendWindow,minTrendSpan",
     "Group fields: display,webhook,alertWebhook,reportInterval,alertRepeatInterval,mention",
     "Use field=nil to clear an optional field.",
@@ -546,64 +546,172 @@ function M.getME(cfg)
   return component.me_interface
 end
 
-local function discoveryRows(me, kind)
+local function rowFromStack(stack, kind)
+  stack = stack or {}
+
   if kind == "item" then
-    local ok, stacks = pcall(me.getItemsInNetwork)
-    if not ok then return nil, tostring(stacks) end
-
-    local merged = {}
-    for _, stack in ipairs(stacks or {}) do
-      local name = tostring(stack.name or "")
-      local label = tostring(stack.label or "")
-      local damage = tonumber(stack.damage) or 0
-      local key = name .. "\0" .. tostring(damage) .. "\0" .. label
-      local row = merged[key]
-      if not row then
-        row = {
-          kind = "item",
-          name = name,
-          label = label,
-          damage = damage,
-          amount = 0,
-        }
-        merged[key] = row
-      end
-      row.amount = row.amount + (tonumber(stack.size) or 0)
-    end
-
-    local rows = {}
-    for _, row in pairs(merged) do rows[#rows + 1] = row end
-    return rows
+    return {
+      kind = "item",
+      name = tostring(stack.name or ""),
+      label = tostring(stack.label or ""),
+      damage = tonumber(stack.damage) or 0,
+      amount = tonumber(stack.size) or 0,
+    }
   end
 
-  if kind == "fluid" then
-    local ok, stacks = pcall(me.getFluidsInNetwork)
-    if not ok then return nil, tostring(stacks) end
+  return {
+    kind = "fluid",
+    name = tostring(stack.name or ""),
+    label = tostring(stack.label or ""),
+    amount = tonumber(stack.amount) or tonumber(stack.size) or 0,
+  }
+end
 
-    local merged = {}
-    for _, stack in ipairs(stacks or {}) do
-      local name = tostring(stack.name or "")
-      local label = tostring(stack.label or "")
-      local key = name .. "\0" .. label
-      local row = merged[key]
-      if not row then
-        row = {
-          kind = "fluid",
-          name = name,
-          label = label,
-          amount = 0,
-        }
-        merged[key] = row
-      end
-      row.amount = row.amount + (tonumber(stack.amount) or tonumber(stack.size) or 0)
+local function mergeRows(stacks, kind)
+  local merged = {}
+
+  for _, stack in ipairs(stacks or {}) do
+    local row = rowFromStack(stack, kind)
+    local key
+
+    if kind == "item" then
+      key = row.name .. "\0" .. tostring(row.damage) .. "\0" .. row.label
+    else
+      key = row.name .. "\0" .. row.label
     end
 
-    local rows = {}
-    for _, row in pairs(merged) do rows[#rows + 1] = row end
-    return rows
+    local existing = merged[key]
+    if existing then
+      existing.amount = existing.amount + row.amount
+    else
+      merged[key] = row
+    end
   end
 
-  return nil, "Unknown discovery kind: " .. tostring(kind)
+  local rows = {}
+  for _, row in pairs(merged) do
+    rows[#rows + 1] = row
+  end
+  return rows
+end
+
+local function simpleTitleCase(value)
+  return (tostring(value or ""):gsub("(%a)([%w_']*)", function(first, rest)
+    return first:upper() .. rest:lower()
+  end))
+end
+
+local function tryExactItemLookup(me, query)
+  local rows = {}
+  local seen = {}
+
+  local function addStacks(stacks)
+    for _, row in ipairs(mergeRows(stacks, "item")) do
+      local key = row.name .. "\0" .. tostring(row.damage) .. "\0" .. row.label
+      if not seen[key] then
+        seen[key] = true
+        rows[#rows + 1] = row
+      end
+    end
+  end
+
+  -- Registry IDs can be looked up without materializing the whole ME network.
+  -- GTNH OpenComputers exposes getItemsInNetworkById for this purpose.
+  if tostring(query):find(":", 1, true) and type(me.getItemsInNetworkById) == "function" then
+    local ok, stacks = pcall(me.getItemsInNetworkById, { tostring(query) })
+    if ok and type(stacks) == "table" then
+      addStacks(stacks)
+    end
+  end
+
+  -- Human-readable labels can be filtered before the result is returned to
+  -- the OC computer. Try the input exactly and a simple title-case variant,
+  -- which makes `find item "iron bar"` useful for labels such as "Iron Bar".
+  local labels = { tostring(query) }
+  local title = simpleTitleCase(query)
+  if title ~= labels[1] then labels[#labels + 1] = title end
+
+  for _, label in ipairs(labels) do
+    local ok, stacks = pcall(me.getItemsInNetwork, { label = label })
+    if ok and type(stacks) == "table" then
+      addStacks(stacks)
+    end
+  end
+
+  return rows
+end
+
+local function tryExactItemInspect(me, name, damage)
+  -- Prefer GTNH's direct/item-ID lookup APIs. These do not return an
+  -- unfiltered table containing every item in the ME network.
+  if tostring(name):find(":", 1, true) then
+    if damage ~= nil and type(me.getItemInNetwork) == "function" then
+      local ok, stack = pcall(me.getItemInNetwork, tostring(name), tonumber(damage) or 0)
+      if ok and type(stack) == "table" then
+        return { rowFromStack(stack, "item") }
+      end
+    end
+
+    if type(me.getItemsInNetworkById) == "function" then
+      local ok, stacks = pcall(me.getItemsInNetworkById, { tostring(name) })
+      if ok and type(stacks) == "table" then
+        local rows = mergeRows(stacks, "item")
+        if damage == nil then return rows end
+
+        local filtered = {}
+        for _, row in ipairs(rows) do
+          if tonumber(row.damage) == tonumber(damage) then
+            filtered[#filtered + 1] = row
+          end
+        end
+        return filtered
+      end
+    end
+  end
+
+  -- Fall back to an exact label filter, which is still memory-safe for the OC.
+  local ok, stacks = pcall(me.getItemsInNetwork, { label = tostring(name) })
+  if not ok then return nil, tostring(stacks) end
+
+  local rows = mergeRows(stacks, "item")
+  if damage == nil then return rows end
+
+  local filtered = {}
+  for _, row in ipairs(rows) do
+    if tonumber(row.damage) == tonumber(damage) then
+      filtered[#filtered + 1] = row
+    end
+  end
+  return filtered
+end
+
+local function fluidRows(me)
+  local ok, stacks = pcall(me.getFluidsInNetwork)
+  if not ok then return nil, tostring(stacks) end
+  return mergeRows(stacks, "fluid")
+end
+
+local function exactFluidInspect(me, name)
+  if type(me.getFluidInNetwork) == "function" then
+    local ok, stack = pcall(me.getFluidInNetwork, tostring(name))
+    if ok and type(stack) == "table" then
+      return { rowFromStack(stack, "fluid") }
+    end
+  end
+
+  -- Older OC builds do not expose getFluidInNetwork. Their only fluid API
+  -- returns the complete fluid list, so retain that as a compatibility fallback.
+  local rows, err = fluidRows(me)
+  if not rows then return nil, err end
+
+  local wanted = lower(name)
+  local matches = {}
+  for _, row in ipairs(rows) do
+    if lower(row.name) == wanted or lower(row.label) == wanted then
+      matches[#matches + 1] = row
+    end
+  end
+  return matches
 end
 
 local function discoveryScore(row, query)
@@ -643,40 +751,126 @@ end
 function M.performDiscovery(me, request)
   request = request or {}
   local kind = tostring(request.kind or ""):lower()
-  local rows, err = discoveryRows(me, kind)
-  if not rows then return nil, err end
-
+  local limit = math.max(1, math.min(100, tonumber(request.limit) or 25))
   local matches = {}
-  if request.mode == "inspect" then
-    local wantedName = lower(request.name)
-    for _, row in ipairs(rows) do
-      local nameMatch = lower(row.name) == wantedName or lower(row.label) == wantedName
-      local damageMatch = request.damage == nil or tonumber(row.damage) == tonumber(request.damage)
-      if nameMatch and damageMatch then
-        row._score = 100
-        matches[#matches + 1] = row
-      end
-    end
-  else
-    for _, row in ipairs(rows) do
-      local score = discoveryScore(row, request.query or "")
-      if score then
-        row._score = score
-        matches[#matches + 1] = row
+  local totalMatches = 0
+
+  local function sortMatches()
+    table.sort(matches, function(a, b)
+      if a._score ~= b._score then return a._score > b._score end
+      local al, bl = lower(a.label), lower(b.label)
+      if al ~= bl then return al < bl end
+      local an, bn = lower(a.name), lower(b.name)
+      if an ~= bn then return an < bn end
+      return tonumber(a.damage or 0) < tonumber(b.damage or 0)
+    end)
+  end
+
+  local function offer(row, score)
+    if not score then return end
+    totalMatches = totalMatches + 1
+    row._score = score
+    matches[#matches + 1] = row
+
+    -- Discovery only needs the best N rows for display. Keeping the complete
+    -- match set defeats the point of streaming on large AE networks.
+    if #matches > limit then
+      sortMatches()
+      while #matches > limit do
+        table.remove(matches)
       end
     end
   end
 
-  table.sort(matches, function(a, b)
-    if a._score ~= b._score then return a._score > b._score end
-    local al, bl = lower(a.label), lower(b.label)
-    if al ~= bl then return al < bl end
-    local an, bn = lower(a.name), lower(b.name)
-    if an ~= bn then return an < bn end
-    return tonumber(a.damage or 0) < tonumber(b.damage or 0)
-  end)
+  if kind == "item" then
+    if request.mode == "inspect" then
+      local rows, err = tryExactItemInspect(me, request.name, request.damage)
+      if not rows then return nil, err end
 
-  local limit = math.max(1, math.min(100, tonumber(request.limit) or 25))
+      for _, row in ipairs(rows) do
+        offer(row, 100)
+      end
+    else
+      local query = tostring(request.query or "")
+
+      -- First try memory-safe exact lookups. Most discovery is done with a
+      -- visible item label, so this avoids walking the network entirely.
+      local exactRows = tryExactItemLookup(me, query)
+      if #exactRows > 0 then
+        for _, row in ipairs(exactRows) do
+          offer(row, discoveryScore(row, query) or 100)
+        end
+      else
+        -- Fuzzy/substring discovery must inspect the network. NEVER call
+        -- getItemsInNetwork() without a filter here: on large GTNH networks
+        -- the returned Lua table can exceed even T3.5 OC memory.
+        --
+        -- allItems() streams one stack at a time, so the OC only retains the
+        -- matching top-N rows. This command is intentionally one-shot; do not
+        -- use this iterator in the monitor's periodic polling loop.
+        if type(me.allItems) ~= "function" then
+          return nil,
+            "No exact item match and this OpenComputers build has no allItems() iterator. " ..
+            "Retry with the exact in-game label/capitalization or an internal registry ID."
+        end
+
+        local okIterator, iterator = pcall(me.allItems)
+        if not okIterator or type(iterator) ~= "function" then
+          return nil, "Could not open AE item iterator: " .. tostring(iterator)
+        end
+
+        while true do
+          local okNext, stack = pcall(iterator)
+          if not okNext then
+            return nil, "AE item iterator failed: " .. tostring(stack)
+          end
+          if stack == nil then break end
+
+          local row = rowFromStack(stack, "item")
+          offer(row, discoveryScore(row, query))
+        end
+      end
+    end
+
+  elseif kind == "fluid" then
+    local rows, err
+
+    if request.mode == "inspect" then
+      rows, err = exactFluidInspect(me, request.name)
+    else
+      -- Current GTNH OC exposes a direct fluid lookup only when the internal
+      -- fluid name is already known. Fuzzy fluid discovery still needs the
+      -- fluid list; unlike items, OC does not expose an allFluids iterator.
+      if type(me.getFluidInNetwork) == "function" then
+        local ok, stack = pcall(me.getFluidInNetwork, tostring(request.query or ""))
+        if ok and type(stack) == "table" then
+          rows = { rowFromStack(stack, "fluid") }
+        end
+      end
+
+      if not rows then
+        rows, err = fluidRows(me)
+      end
+    end
+
+    if not rows then return nil, err end
+
+    if request.mode == "inspect" then
+      for _, row in ipairs(rows) do
+        offer(row, 100)
+      end
+    else
+      for _, row in ipairs(rows) do
+        offer(row, discoveryScore(row, request.query or ""))
+      end
+    end
+
+  else
+    return nil, "Unknown discovery kind: " .. tostring(kind)
+  end
+
+  sortMatches()
+
   local shown = math.min(#matches, limit)
   local lines = {}
 
@@ -686,12 +880,13 @@ function M.performDiscovery(me, request)
     lines[#lines + 1] = "AE " .. kind .. " search: " .. tostring(request.query)
   end
 
-  if #matches == 0 then
+  if totalMatches == 0 then
     lines[#lines + 1] = "No matching " .. kind .. " resources found in the live AE network."
     return table.concat(lines, "\n"), { total = 0, shown = 0 }
   end
 
-  lines[#lines + 1] = "Found " .. tostring(#matches) .. " match(es); showing " .. tostring(shown) .. "."
+  lines[#lines + 1] =
+    "Found " .. tostring(totalMatches) .. " match(es); showing " .. tostring(shown) .. "."
 
   for i = 1, shown do
     local row = matches[i]
@@ -699,22 +894,26 @@ function M.performDiscovery(me, request)
     lines[#lines + 1] = ""
     lines[#lines + 1] = "[" .. tostring(i) .. "] " .. label
     lines[#lines + 1] = "  name:   " .. (row.name ~= "" and row.name or "(missing)")
+
     if row.kind == "item" then
       lines[#lines + 1] = "  damage: " .. tostring(row.damage or 0)
       lines[#lines + 1] = "  stored: " .. humanAmount(row.amount)
     else
       lines[#lines + 1] = "  stored: " .. humanAmount(row.amount) .. " L"
     end
+
     lines[#lines + 1] = "  matcher: " .. matcherText(row)
     lines[#lines + 1] = "  add: " .. addTemplate(row)
   end
 
-  if shown < #matches then
+  if shown < totalMatches then
     lines[#lines + 1] = ""
-    lines[#lines + 1] = "Narrow the query or add limit=N (maximum 100) to show more."
+    lines[#lines + 1] =
+      "Narrow the query or add limit=N (maximum 100) to show more."
   end
 
-  return table.concat(lines, "\n"), { total = #matches, shown = shown }
+  return table.concat(lines, "\n"),
+    { total = totalMatches, shown = shown }
 end
 
 -- Quoted tokenizer for Discord commands.
