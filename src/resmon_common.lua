@@ -5,6 +5,33 @@ local M = {}
 
 M.CONFIG_PATH = "/etc/resmon.cfg"
 M.REPORT_REQUEST_PATH = "/tmp/resmon.report"
+M.VERSION_PATH = "/usr/share/resmon/VERSION"
+
+local function readVersionFile(path)
+  local file = io.open(path, "r")
+  if not file then
+    return nil
+  end
+
+  local version = file:read("*l")
+  file:close()
+
+  if not version then
+    return nil
+  end
+
+  version = version:match("^%s*(.-)%s*$")
+
+  if version == "" then
+    return nil
+  end
+
+  return version
+end
+
+function M.getVersion()
+  return readVersionFile(M.VERSION_PATH) or "unknown"
+end
 
 local function deepcopy(value, seen)
   if type(value) ~= "table" then return value end
@@ -67,7 +94,7 @@ local DEFAULT = {
       alertRepeatInterval = 2 * 60 * 60,
       mention = "",
 
-      -- Discord formatting. Embeds are the default in 2.6.0; set
+      -- Discord formatting. Embeds are the default since 2.6.0; set
       -- reportStyle=text to retain the legacy plain-text reports.
       reportStyle = "embed",
 
@@ -322,6 +349,7 @@ function M.helpText(prefix)
   prefix = prefix or "resmonctl"
   local p = prefix ~= "" and (prefix .. " ") or ""
   return table.concat({
+    p .. "version",
     p .. "list",
     p .. "find <item|fluid> <query> [limit=N]",
     p .. "inspect item <name> [damage]",
@@ -359,6 +387,12 @@ function M.applyCommand(cfg, tokens)
   end
 
   local cmd = tostring(tokens[1]):lower()
+
+  if cmd == "version" then
+    return true,
+      "GTNH Resource Monitor " .. M.getVersion(),
+      false
+  end
 
   if cmd == "list" then
     return true, listText(cfg), false
