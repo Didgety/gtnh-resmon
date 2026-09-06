@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.6.1
+
+- Changed default behavior to not show log messages in console
+- Fixed header column alignment on dashboard displays
+
 ## 2.6.0
 
 - Added multi-screen OpenComputers dashboards with per-screen group filtering and paging.
