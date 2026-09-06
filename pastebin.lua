@@ -16,8 +16,24 @@ if not REPOSITORY:match("^[%w%._%-]+/[%w%._%-]+$") then
   return 1
 end
 
-local url = "https://raw.githubusercontent.com/" .. REPOSITORY .. "/refs/heads/main/installer.lua"
-local temp = os.tmpname()
+local url = "https://raw.githubusercontent.com/" .. REPOSITORY .. "/main/installer.lua"
+
+-- Do not place the bootstrap itself in /tmp. On GTNH/OpenOS that tmpfs may
+-- only be about 64 KiB, and the installer needs that space for the shell too.
+local stagingRoot = "/var/tmp"
+if not fs.exists(stagingRoot) then
+  local made, makeReason = fs.makeDirectory(stagingRoot)
+  if not made and not fs.isDirectory(stagingRoot) then
+    io.stderr:write(
+      "Could not create " .. stagingRoot .. ": " ..
+      tostring(makeReason or "unknown error") .. "\n"
+    )
+    return 1
+  end
+end
+
+local temp = fs.concat(stagingRoot, "resmon-bootstrap.lua")
+if fs.exists(temp) then fs.remove(temp) end
 
 local ok, reason = shell.execute("wget", nil, "-fq", url, temp)
 if not ok or not fs.exists(temp) then
@@ -27,7 +43,17 @@ if not ok or not fs.exists(temp) then
 end
 
 local forwarded = {...}
-table.insert(forwarded, "--repo=" .. REPOSITORY)
+local hasRepo = false
+for _, argument in ipairs(forwarded) do
+  if tostring(argument):match("^%-%-repo=") then
+    hasRepo = true
+    break
+  end
+end
+if not hasRepo then
+  table.insert(forwarded, "--repo=" .. REPOSITORY)
+end
+
 local ran, runReason = shell.execute(temp, nil, table.unpack(forwarded))
 fs.remove(temp)
 

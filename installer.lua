@@ -61,7 +61,7 @@ Examples:
   installer.lua
   installer.lua --enable --start
   installer.lua update --restart
-  installer.lua --tag=v2.4.1
+  installer.lua --tag=v2.6.0
 ]])
 end
 
@@ -91,7 +91,10 @@ if targetFs.isReadOnly and targetFs.isReadOnly() then
   return fail("OpenOS is running from a read-only filesystem; run 'install' and boot from the HDD first")
 end
 
-local workDir = "/tmp/resmon-installer"
+-- OpenOS /tmp is commonly a very small tmpfs (~64 KiB in GTNH).
+-- Stage downloads on the writable OpenOS disk instead.
+local stagingRoot = "/var/tmp"
+local workDir = fs.concat(stagingRoot, "resmon-installer")
 local stageDir = fs.concat(workDir, "release")
 local latestJsonPath = fs.concat(workDir, "latest.json")
 local previousCwd = shell.getWorkingDirectory()
@@ -101,7 +104,7 @@ local function cleanup()
   if not options.keep then
     shell.execute("rm -rf " .. workDir)
   else
-    print("Temporary files kept at " .. workDir)
+    print("Temporary files kept on disk at " .. workDir)
   end
 end
 
@@ -229,7 +232,12 @@ end
 local function main()
   shell.execute("rm -rf " .. workDir)
 
-  local ok, reason = ensureDirectory(workDir)
+  local ok, reason = ensureDirectory(stagingRoot)
+  if not ok then
+    return nil, "could not create disk staging directory " .. stagingRoot .. ": " .. tostring(reason)
+  end
+
+  ok, reason = ensureDirectory(workDir)
   if not ok then
     return nil, reason
   end
