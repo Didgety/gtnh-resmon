@@ -11,8 +11,8 @@ local shell = require("shell")
 
 local REPOSITORY = "Didgety/gtnh-resmon"
 
-if REPOSITORY:find("Didgety", 1, true) then
-  io.stderr:write("Pastebin bootstrap: configure REPOSITORY before publishing this paste.\n")
+if not REPOSITORY:match("^[%w%._%-]+/[%w%._%-]+$") then
+  io.stderr:write("Pastebin bootstrap: invalid GitHub repository.\n")
   return 1
 end
 
