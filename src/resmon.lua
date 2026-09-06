@@ -803,6 +803,86 @@ local function fitText(text, width)
   return text .. string.rep(" ", width - len)
 end
 
+local function clipText(text, width)
+  text = tostring(text or "")
+  width = math.max(0, tonumber(width) or 0)
+  if width == 0 then return "" end
+
+  local len = ulen(text)
+  if len > width then
+    if width <= 3 then return usub(text, 1, width) end
+    return usub(text, 1, width - 3) .. "..."
+  end
+  return text
+end
+
+local function padRight(text, width)
+  text = clipText(text, width)
+  return text .. string.rep(" ", width - ulen(text))
+end
+
+local function padLeft(text, width)
+  text = clipText(text, width)
+  return string.rep(" ", width - ulen(text)) .. text
+end
+
+local function screenProgressBar(percent, width)
+  if percent == nil then return string.rep(" ", width) end
+  width = math.max(5, math.min(20, math.floor(tonumber(width) or 12)))
+  local clamped = math.max(0, math.min(100, tonumber(percent) or 0))
+  local filled = math.floor((clamped / 100) * width + 0.5)
+  return string.rep("█", filled) .. string.rep("░", width - filled)
+end
+
+local function dashboardLayout(width, dashboard)
+  local groupId = tostring(dashboard.group or "default")
+  local group = cfg.groups[groupId] or cfg.groups.default or {}
+
+  local showBar = group.progressBar == true and width >= 120
+  local barWidth = showBar and math.max(5, math.min(20, tonumber(group.progressWidth) or 12)) or 0
+
+  local layout = {
+    status = 4,
+    amount = 12,
+    percent = 7,
+    rate = 14,
+    eta = 8,
+    showBar = showBar,
+    bar = barWidth,
+  }
+
+  local fixed =
+    layout.status + 1 +
+    layout.amount + 1 +
+    layout.percent + 1 +
+    layout.rate + 1 +
+    layout.eta
+
+  if showBar then
+    fixed = fixed + 1 + layout.bar
+  end
+
+  layout.name = math.max(12, width - fixed - 1)
+  return layout
+end
+
+local function dashboardHeaderText(layout)
+  local parts = {
+    padRight("STAT", layout.status),
+    padRight("RESOURCE / GROUP", layout.name),
+    padLeft("AMOUNT", layout.amount),
+    padLeft("%", layout.percent),
+    padLeft("RATE/H", layout.rate),
+    padLeft("ETA", layout.eta),
+  }
+
+  if layout.showBar then
+    parts[#parts + 1] = padRight("BAR", layout.bar)
+  end
+
+  return table.concat(parts, " ")
+end
+
 local function resolveComponentAddress(value, expectedType)
   value = tostring(value or "")
   if value == "" then return nil, "missing " .. expectedType .. " address" end
@@ -857,36 +937,54 @@ local function dashboardResourceName(row, dashboard)
 end
 
 local function dashboardRowText(row, dashboard, now, width)
+  local layout = dashboardLayout(width, dashboard)
   local status = dashboardStatus(row)
   local name = dashboardResourceName(row, dashboard)
+
   if row.error or row.amount == nil then
-    return status .. " " .. name .. " | " .. tostring(row.error or "query failed")
+    local parts = {
+      padRight(status, layout.status),
+      padRight(name, layout.name),
+      padLeft("--", layout.amount),
+      padLeft("--", layout.percent),
+      padLeft("ERROR", layout.rate),
+      padLeft("--", layout.eta),
+    }
+
+    if layout.showBar then
+      parts[#parts + 1] = padRight("", layout.bar)
+    end
+
+    return table.concat(parts, " ")
   end
 
   local m = metricsFor(row, now)
   local amount = humanNumber(row.amount) .. unit(row.resource)
   local percent = m.percent and string.format("%.1f%%", m.percent) or "--"
+
   local rate = "--"
   if m.rateHour then
-    rate = string.format("%+.2f", m.rateHour) .. unit(row.resource) .. "/h"
+    local sign = m.rateHour >= 0 and "+" or ""
+    rate = sign .. humanNumber(m.rateHour) .. unit(row.resource) .. "/h"
   end
+
   local eta = m.eta and humanDuration(m.eta) or "--"
 
-  if width >= 100 then
-    local fixed = 4 + 1 + 12 + 1 + 8 + 1 + 18 + 1 + 10
-    local nameWidth = math.max(12, width - fixed)
-    return string.format(
-      "%-4s %s %12s %8s %18s %10s",
-      status,
-      fitText(name, nameWidth),
-      amount,
-      percent,
-      rate,
-      eta
-    )
+  local parts = {
+    padRight(status, layout.status),
+    padRight(name, layout.name),
+    padLeft(amount, layout.amount),
+    padLeft(percent, layout.percent),
+    padLeft(rate, layout.rate),
+    padLeft(eta, layout.eta),
+  }
+
+  if layout.showBar then
+    local bar = m.percent and screenProgressBar(m.percent, layout.bar) or ""
+    parts[#parts + 1] = padRight(bar, layout.bar)
   end
 
-  return status .. " " .. name .. " | " .. amount .. " | " .. percent .. " | " .. rate .. " | " .. eta
+  return table.concat(parts, " ")
 end
 
 local function dashboardTitle(id, dashboard)
@@ -988,12 +1086,10 @@ local function renderDashboard(id, dashboard, snapshot, now, force)
     width
   ))
 
+  local layout = dashboardLayout(width, dashboard)
+
   pcall(gpu.setForeground, COLOR_DIM)
-  if width >= 100 then
-    gpu.set(1, 2, fitText("STAT RESOURCE / GROUP                           AMOUNT        %             RATE/H        ETA", width))
-  else
-    gpu.set(1, 2, fitText("STAT RESOURCE | AMOUNT | % | RATE/H | ETA", width))
-  end
+  gpu.set(1, 2, dashboardHeaderText(layout))
 
   if not snapshot then
     pcall(gpu.setForeground, COLOR_TEXT)
@@ -1009,7 +1105,7 @@ local function renderDashboard(id, dashboard, snapshot, now, force)
       local row = rows[index]
       local _, color = dashboardStatus(row)
       pcall(gpu.setForeground, color)
-      gpu.set(1, y, fitText(dashboardRowText(row, dashboard, now, width), width))
+      gpu.set(1, y, dashboardRowText(row, dashboard, now, width))
       y = y + 1
     end
   end

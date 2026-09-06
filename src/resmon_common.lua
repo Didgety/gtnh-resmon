@@ -195,7 +195,7 @@ local NUMERIC_KEYS = {
 }
 
 local BOOLEAN_KEYS = {
-  enabled = true, reportOnStart = true, consoleLog = true,
+  enabled = true, reportOnStart = true, consoleLog = false,
   progressBar = true,
 }
 
