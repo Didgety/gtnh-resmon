@@ -265,6 +265,9 @@ function M.helpText(prefix)
   local p = prefix ~= "" and (prefix .. " ") or ""
   return table.concat({
     p .. "list",
+    p .. "find <item|fluid> <query> [limit=N]",
+    p .. "inspect item <name> [damage]",
+    p .. "inspect fluid <name>",
     p .. "add <item|fluid> <group> <id> key=value ...",
     p .. "update <id> key=value ...",
     p .. "remove <id>",
@@ -277,6 +280,7 @@ function M.helpText(prefix)
     p .. "discord-admin remove <userId>",
     p .. "report [group]",
     "",
+    "Discovery searches the live AE network and prints exact name/damage matchers.",
     "Resource fields: display,label,name,damage,min,recover,target,unit,group,trendWindow,minTrendSpan",
     "Group fields: display,webhook,alertWebhook,reportInterval,alertRepeatInterval,mention",
     "Use field=nil to clear an optional field.",
@@ -292,6 +296,62 @@ function M.applyCommand(cfg, tokens)
 
   if cmd == "list" then
     return true, listText(cfg), false
+  end
+
+  if cmd == "find" then
+    local kind = tostring(tokens[2] or ""):lower()
+    if kind ~= "item" and kind ~= "fluid" then
+      return false, "Usage: find <item|fluid> <query> [limit=N]", false
+    end
+
+    local queryParts = {}
+    local limit = 25
+    for i = 3, #tokens do
+      local token = tostring(tokens[i])
+      local value = token:match("^limit=(%d+)$")
+      if value then
+        limit = math.max(1, math.min(100, tonumber(value) or 25))
+      else
+        queryParts[#queryParts + 1] = token
+      end
+    end
+
+    local query = table.concat(queryParts, " ")
+    if query == "" then
+      return false, "Missing search query. Use '*' to list everything.", false
+    end
+
+    return true,
+      "Searching live AE " .. kind .. " inventory for '" .. query .. "'...",
+      false,
+      { discovery = { mode = "find", kind = kind, query = query, limit = limit } }
+  end
+
+  if cmd == "inspect" then
+    local kind = tostring(tokens[2] or ""):lower()
+    if kind ~= "item" and kind ~= "fluid" then
+      return false, "Usage: inspect item <name> [damage] | inspect fluid <name>", false
+    end
+
+    local name = tokens[3]
+    if not name or tostring(name) == "" then
+      return false, "Missing internal resource name", false
+    end
+
+    local damage = nil
+    if kind == "item" and tokens[4] ~= nil then
+      damage = tonumber(tokens[4])
+      if damage == nil then
+        return false, "Item damage/meta must be numeric", false
+      end
+    elseif kind == "fluid" and tokens[4] ~= nil then
+      return false, "Fluid inspect does not take damage/meta", false
+    end
+
+    return true,
+      "Inspecting live AE " .. kind .. " inventory...",
+      false,
+      { discovery = { mode = "inspect", kind = kind, name = tostring(name), damage = damage, limit = 100 } }
   end
 
   if cmd == "add" then
@@ -437,6 +497,224 @@ function M.applyCommand(cfg, tokens)
   end
 
   return false, "Unknown command: " .. cmd .. "\n" .. M.helpText(""), false
+end
+
+----------------------------------------------------------------------
+-- Live AE discovery helpers
+----------------------------------------------------------------------
+
+local function lower(value)
+  return tostring(value or ""):lower()
+end
+
+local function shellQuoted(value)
+  local s = tostring(value or "")
+  s = s:gsub("\\", "\\\\"):gsub('"', '\\"')
+  return '"' .. s .. '"'
+end
+
+local function humanAmount(value)
+  value = tonumber(value) or 0
+  local a = math.abs(value)
+  local function trim(n)
+    return string.format("%.2f", n):gsub("0+$", ""):gsub("%.$", "")
+  end
+  if a >= 1e15 then return trim(value / 1e15) .. "P" end
+  if a >= 1e12 then return trim(value / 1e12) .. "T" end
+  if a >= 1e9 then return trim(value / 1e9) .. "B" end
+  if a >= 1e6 then return trim(value / 1e6) .. "M" end
+  if a >= 1e3 then return trim(value / 1e3) .. "k" end
+  return tostring(math.floor(value + 0.5))
+end
+
+function M.getME(cfg)
+  local component = require("component")
+  local address = cfg and cfg.settings and cfg.settings.meAddress or ""
+
+  if address and address ~= "" then
+    local proxy = component.proxy(address)
+    if not proxy then
+      return nil, "Configured ME component not found: " .. tostring(address)
+    end
+    return proxy
+  end
+
+  if not component.isAvailable("me_interface") then
+    return nil, "No me_interface found. Put an OC Adapter adjacent to an AE2 ME Interface."
+  end
+
+  return component.me_interface
+end
+
+local function discoveryRows(me, kind)
+  if kind == "item" then
+    local ok, stacks = pcall(me.getItemsInNetwork)
+    if not ok then return nil, tostring(stacks) end
+
+    local merged = {}
+    for _, stack in ipairs(stacks or {}) do
+      local name = tostring(stack.name or "")
+      local label = tostring(stack.label or "")
+      local damage = tonumber(stack.damage) or 0
+      local key = name .. "\0" .. tostring(damage) .. "\0" .. label
+      local row = merged[key]
+      if not row then
+        row = {
+          kind = "item",
+          name = name,
+          label = label,
+          damage = damage,
+          amount = 0,
+        }
+        merged[key] = row
+      end
+      row.amount = row.amount + (tonumber(stack.size) or 0)
+    end
+
+    local rows = {}
+    for _, row in pairs(merged) do rows[#rows + 1] = row end
+    return rows
+  end
+
+  if kind == "fluid" then
+    local ok, stacks = pcall(me.getFluidsInNetwork)
+    if not ok then return nil, tostring(stacks) end
+
+    local merged = {}
+    for _, stack in ipairs(stacks or {}) do
+      local name = tostring(stack.name or "")
+      local label = tostring(stack.label or "")
+      local key = name .. "\0" .. label
+      local row = merged[key]
+      if not row then
+        row = {
+          kind = "fluid",
+          name = name,
+          label = label,
+          amount = 0,
+        }
+        merged[key] = row
+      end
+      row.amount = row.amount + (tonumber(stack.amount) or tonumber(stack.size) or 0)
+    end
+
+    local rows = {}
+    for _, row in pairs(merged) do rows[#rows + 1] = row end
+    return rows
+  end
+
+  return nil, "Unknown discovery kind: " .. tostring(kind)
+end
+
+local function discoveryScore(row, query)
+  local q = lower(query)
+  if q == "*" then return 1 end
+
+  local name = lower(row.name)
+  local label = lower(row.label)
+  local damage = row.damage ~= nil and tostring(row.damage) or ""
+
+  if name == q then return 100 end
+  if label == q then return 95 end
+  if damage == q then return 90 end
+  if name:find(q, 1, true) then return 70 end
+  if label:find(q, 1, true) then return 65 end
+  if damage:find(q, 1, true) then return 50 end
+  return nil
+end
+
+local function matcherText(row)
+  if row.kind == "item" then
+    return "name=" .. shellQuoted(row.name) .. " damage=" .. tostring(row.damage or 0)
+  end
+  return "name=" .. shellQuoted(row.name)
+end
+
+local function addTemplate(row)
+  local display = row.label ~= "" and row.label or row.name
+  if row.kind == "item" then
+    return "resmonctl add item <group> <id> " .. matcherText(row) ..
+      " display=" .. shellQuoted(display) .. " min=<amount> target=<amount>"
+  end
+  return "resmonctl add fluid <group> <id> " .. matcherText(row) ..
+    " display=" .. shellQuoted(display) .. " unit=L min=<amount> target=<amount>"
+end
+
+function M.performDiscovery(me, request)
+  request = request or {}
+  local kind = tostring(request.kind or ""):lower()
+  local rows, err = discoveryRows(me, kind)
+  if not rows then return nil, err end
+
+  local matches = {}
+  if request.mode == "inspect" then
+    local wantedName = lower(request.name)
+    for _, row in ipairs(rows) do
+      local nameMatch = lower(row.name) == wantedName or lower(row.label) == wantedName
+      local damageMatch = request.damage == nil or tonumber(row.damage) == tonumber(request.damage)
+      if nameMatch and damageMatch then
+        row._score = 100
+        matches[#matches + 1] = row
+      end
+    end
+  else
+    for _, row in ipairs(rows) do
+      local score = discoveryScore(row, request.query or "")
+      if score then
+        row._score = score
+        matches[#matches + 1] = row
+      end
+    end
+  end
+
+  table.sort(matches, function(a, b)
+    if a._score ~= b._score then return a._score > b._score end
+    local al, bl = lower(a.label), lower(b.label)
+    if al ~= bl then return al < bl end
+    local an, bn = lower(a.name), lower(b.name)
+    if an ~= bn then return an < bn end
+    return tonumber(a.damage or 0) < tonumber(b.damage or 0)
+  end)
+
+  local limit = math.max(1, math.min(100, tonumber(request.limit) or 25))
+  local shown = math.min(#matches, limit)
+  local lines = {}
+
+  if request.mode == "inspect" then
+    lines[#lines + 1] = "AE " .. kind .. " inspection: " .. tostring(request.name)
+  else
+    lines[#lines + 1] = "AE " .. kind .. " search: " .. tostring(request.query)
+  end
+
+  if #matches == 0 then
+    lines[#lines + 1] = "No matching " .. kind .. " resources found in the live AE network."
+    return table.concat(lines, "\n"), { total = 0, shown = 0 }
+  end
+
+  lines[#lines + 1] = "Found " .. tostring(#matches) .. " match(es); showing " .. tostring(shown) .. "."
+
+  for i = 1, shown do
+    local row = matches[i]
+    local label = row.label ~= "" and row.label or "(no label)"
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "[" .. tostring(i) .. "] " .. label
+    lines[#lines + 1] = "  name:   " .. (row.name ~= "" and row.name or "(missing)")
+    if row.kind == "item" then
+      lines[#lines + 1] = "  damage: " .. tostring(row.damage or 0)
+      lines[#lines + 1] = "  stored: " .. humanAmount(row.amount)
+    else
+      lines[#lines + 1] = "  stored: " .. humanAmount(row.amount) .. " L"
+    end
+    lines[#lines + 1] = "  matcher: " .. matcherText(row)
+    lines[#lines + 1] = "  add: " .. addTemplate(row)
+  end
+
+  if shown < #matches then
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "Narrow the query or add limit=N (maximum 100) to show more."
+  end
+
+  return table.concat(lines, "\n"), { total = #matches, shown = shown }
 end
 
 -- Quoted tokenizer for Discord commands.

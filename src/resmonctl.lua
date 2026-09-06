@@ -43,6 +43,23 @@ if changed then
   end
 end
 
+if action and action.discovery then
+  local me, meErr = common.getME(cfg)
+  if not me then
+    io.stderr:write("Could not access AE network: ", tostring(meErr), "\n")
+    return
+  end
+
+  local text, discoveryErr = common.performDiscovery(me, action.discovery)
+  if not text then
+    io.stderr:write("AE discovery failed: ", tostring(discoveryErr), "\n")
+    return
+  end
+
+  print(text)
+  return
+end
+
 if action and action.report then
   local f, openErr = io.open(common.REPORT_REQUEST_PATH, "w")
   if not f then

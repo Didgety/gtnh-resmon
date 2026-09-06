@@ -697,21 +697,31 @@ local function handleDiscordCommand(message, now)
     -- value; reload the persisted config to keep failed commands transactional.
     local fresh = common.loadConfig()
     if fresh then cfg = fresh end
-    botReply("❌ " .. msg)
+    botReply("F - " .. msg)
     return
   end
 
   if changed then
     local saved, saveErr = common.saveConfig(cfg)
     if not saved then
-      botReply("❌ Could not save config: " .. tostring(saveErr))
+      botReply("F - Could not save config: " .. tostring(saveErr))
       local fresh = common.loadConfig()
       if fresh then cfg = fresh end
       return
     end
   end
 
-  botReply("✅ " .. msg)
+  if action and action.discovery then
+    local text, discoveryErr = common.performDiscovery(me, action.discovery)
+    if not text then
+      botReply("F - AE discovery failed: " .. tostring(discoveryErr))
+    else
+      botReply(text)
+    end
+    return
+  end
+
+  botReply("G - " .. msg)
   if action and action.report then sendRequestedReports(action.report, now) end
 end
 
