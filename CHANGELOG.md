@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.6.2
+
+- Fixes stdout suppression setting for daemon
+
 ## 2.6.1
 
 - Changed default behavior to not show log messages in console
