@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.0
+
+- Uses tar utility from [mpmxyz](https://github.com/mpmxyz/ocprograms/)
+- Fixes bugs that sometimes prevent installation via pastebin.
+- Automates releases on GitHub.
+
 ## 2.2.0 - network/Pastebin installer
 
 - Added a permanent Pastebin bootstrap that forwards to the current GitHub installer.
