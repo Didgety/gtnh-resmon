@@ -195,7 +195,7 @@ local NUMERIC_KEYS = {
 }
 
 local BOOLEAN_KEYS = {
-  enabled = true, reportOnStart = true, consoleLog = false,
+  enabled = true, reportOnStart = true, consoleLog = true,
   progressBar = true,
 }
 
@@ -261,7 +261,7 @@ local SETTINGS_FIELDS = {
   siteName = true, webhookName = true, meAddress = true, pollInterval = true,
   trendWindow = true, minTrendSpan = true,
   configReloadInterval = true, reportOnStart = true,
-  httpTimeout = true, consoleLog = true,
+  httpTimeout = true, consoleLog = false,
 }
 
 local DISCORD_FIELDS = {

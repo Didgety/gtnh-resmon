@@ -241,7 +241,15 @@ local function joinArgs(...)
 end
 
 local function consoleLoggingEnabled()
-  return not cfg.settings or cfg.settings.consoleLog ~= false
+  local value = cfg.settings and cfg.settings.consoleLog
+
+  -- Accept the legacy string form produced by the old parser.
+  if value == "true" then
+    return true
+  end
+
+  -- Console output is opt-in.
+  return value == true
 end
 
 local function infoLog(...)
