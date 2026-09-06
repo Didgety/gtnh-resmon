@@ -61,7 +61,7 @@ Examples:
   installer.lua
   installer.lua --enable --start
   installer.lua update --restart
-  installer.lua --tag=v2.6.0
+  installer.lua --tag=vX.Y.Z
 ]])
 end
 
