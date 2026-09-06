@@ -161,8 +161,7 @@ print("Extracting release ...")
   local extracted, extractReason = execute(
     tarCommand,
     "--dir=" .. extractDir,
-    -- "-xf",
-    "-xfv", -- debug verbosity
+    "-xvf",
     archivePath
   )
   if not extracted then
