@@ -1,10 +1,19 @@
 # Changelog
 
-## 2.3.0
+## 2.4.1
+
+- Fixes a bug during setup preventing the download of the repository.
+
+## 2.4.0
 
 - Uses tar utility from [mpmxyz](https://github.com/mpmxyz/ocprograms/)
 - Fixes bugs that sometimes prevent installation via pastebin.
 - Automates releases on GitHub.
+
+## 2.3.0
+
+- Is not real
+- Can't hurt you
 
 ## 2.2.0 - network/Pastebin installer
 
