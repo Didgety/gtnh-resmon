@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.5.0
+
+- Remove tar utility dependency
+
 ## 2.4.2
 
 - Fixes a bug in tar extraction
