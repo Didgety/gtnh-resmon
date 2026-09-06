@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.4.2
+
+- Fixes a bug in tar extraction
+- Update repo checks to validate format
+
 ## 2.4.1
 
 - Fixes a bug during setup preventing the download of the repository.
