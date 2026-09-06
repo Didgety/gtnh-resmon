@@ -155,8 +155,13 @@ local function main()
   end
 
   print("Extracting release ...")
-  shell.setWorkingDirectory(extractDir)
-  local extracted, extractReason = execute(tarCommand, "-xf", archivePath)
+  local extracted, extractReason =
+    execute(
+      tarCommand,
+      "--dir=" .. extractDir,
+      "-xf",
+      archivePath
+    )
   if not extracted then return nil, "could not extract release: " .. tostring(extractReason) end
 
   local setupPath = fs.concat(extractDir, "setup.lua")
