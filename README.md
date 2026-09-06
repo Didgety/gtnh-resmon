@@ -15,15 +15,54 @@ An OpenComputers/OpenOS daemon for **GregTech: New Horizons** that monitors sele
 - Optional Discord administration using a bot in a private admin channel.
 - Native OpenOS `rc` service for autostart.
 
-## OpenOS installation
+## Recommended installation: Pastebin bootstrap
 
-Copy/clone the repository onto the OC computer, enter the repository directory, then run:
+```sh
+pastebin run f6Wvf4sY --enable --start
+```
+
+Update an existing installation to the latest GitHub Release and restart it:
+
+```sh
+pastebin run f6Wvf4sY update --restart
+```
+
+Install a specific release:
+
+```sh
+pastebin run f6Wvf4sY --tag=v2.2.0
+```
+
+The Pastebin code is deliberately tiny. It downloads the current `installer.lua` from the
+`main` branch, so installer fixes do **not** require creating a new Pastebin ID. The network
+installer then downloads `GTNHResourceMonitor.tar` from the latest GitHub Release, extracts it
+under `/tmp`, and delegates to `setup.lua`.
+
+Normal install/update operations preserve:
+
+```text
+/etc/resmon.cfg
+/var/lib/resmon.state
+```
+
+### Direct GitHub fallback
+
+If Pastebin is unavailable, the same installer can be launched directly from GitHub:
+
+```sh
+wget -f https://raw.githubusercontent.com/Didgety/gtnh-resmon/main/installer.lua /tmp/resmon-installer.lua && /tmp/resmon-installer.lua --repo=Didgety/gtnh-resmon
+```
+
+### Local/repository installation
+
+For development, or if the repository has already been copied onto the OC computer, enter the
+repository root and run:
 
 ```sh
 ./setup.lua install
 ```
 
-The installer puts files in standard OpenOS locations:
+The local installer puts files in standard OpenOS locations:
 
 ```text
 /usr/bin/resmon.lua
@@ -32,27 +71,23 @@ The installer puts files in standard OpenOS locations:
 /etc/rc.d/resmon.lua
 ```
 
-It also creates the initial configuration, if missing:
+It also creates the initial configuration if missing:
 
 ```text
 /etc/resmon.cfg
 ```
 
-Existing configuration and runtime state are **never overwritten by normal install/update operations**.
-
-To install and enable the monitor at boot:
+To enable at boot:
 
 ```sh
 ./setup.lua install --enable
 ```
 
-To also start it immediately:
+To start immediately as well:
 
 ```sh
 ./setup.lua install --enable --start
 ```
-
-Usually it is better to configure your resources first, then enable/start it.
 
 ## Initial configuration
 
