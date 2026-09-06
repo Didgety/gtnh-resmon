@@ -41,6 +41,11 @@ local DEFAULT = {
     reportOnStart = true,
     httpTimeout = 15,
 
+    -- Routine daemon output can overwrite an interactive OpenOS shell because
+    -- rc services inherit a terminal. Set this false when using dashboard
+    -- screens; errors are still reflected on configured dashboards.
+    consoleLog = true,
+
     discord = {
       enabled = false,
       apiBase = "https://discord.com/api/v10",
@@ -65,6 +70,11 @@ local DEFAULT = {
   },
 
   resources = {},
+
+  -- Dedicated OC dashboard screens. A dashboard GPU should not be the primary
+  -- terminal GPU. Multiple screens may share a dedicated GPU (the monitor will
+  -- rebind it while refreshing), though one GPU per screen is smoother.
+  screens = {},
 }
 
 function M.defaultConfig()
@@ -98,6 +108,7 @@ function M.loadConfig(path)
   cfg.settings.discord = cfg.settings.discord or {}
   cfg.groups = cfg.groups or {}
   cfg.resources = cfg.resources or {}
+  cfg.screens = cfg.screens or {}
   cfg.revision = tonumber(cfg.revision) or 0
 
   return cfg
@@ -144,10 +155,11 @@ local NUMERIC_KEYS = {
   reportInterval = true, alertRepeatInterval = true,
   pollInterval = true, trendWindow = true, minTrendSpan = true,
   configReloadInterval = true, httpTimeout = true,
+  pageInterval = true,
 }
 
 local BOOLEAN_KEYS = {
-  enabled = true, reportOnStart = true,
+  enabled = true, reportOnStart = true, consoleLog = true,
 }
 
 local function coerce(key, value)
@@ -202,11 +214,16 @@ local GROUP_FIELDS = {
   reportInterval = true, alertRepeatInterval = true, mention = true,
 }
 
+local SCREEN_FIELDS = {
+  screen = true, gpu = true, group = true, title = true,
+  enabled = true, pageInterval = true,
+}
+
 local SETTINGS_FIELDS = {
   siteName = true, webhookName = true, meAddress = true, pollInterval = true,
   trendWindow = true, minTrendSpan = true,
   configReloadInterval = true, reportOnStart = true,
-  httpTimeout = true,
+  httpTimeout = true, consoleLog = true,
 }
 
 local DISCORD_FIELDS = {
@@ -219,6 +236,31 @@ function M.findResource(cfg, id)
     if r.id == id then return r, i end
   end
   return nil
+end
+
+local function screenListText(cfg)
+  local lines = { "Dashboard screens:" }
+  local ids = {}
+  for id in pairs(cfg.screens or {}) do ids[#ids + 1] = id end
+  table.sort(ids)
+
+  if #ids == 0 then
+    lines[#lines + 1] = "  (none)"
+  else
+    for _, id in ipairs(ids) do
+      local d = cfg.screens[id]
+      lines[#lines + 1] = string.format(
+        "  %s enabled=%s group=%s screen=%s gpu=%s page=%ss",
+        id,
+        tostring(d.enabled ~= false),
+        tostring(d.group or "*"),
+        tostring(d.screen or "missing"),
+        tostring(d.gpu or "missing"),
+        tostring(d.pageInterval or 10)
+      )
+    end
+  end
+  return table.concat(lines, "\n")
 end
 
 local function listText(cfg)
@@ -257,6 +299,9 @@ local function listText(cfg)
       ))
     end
   end
+
+  table.insert(lines, "")
+  table.insert(lines, screenListText(cfg))
   return table.concat(lines, "\n")
 end
 
@@ -274,6 +319,11 @@ function M.helpText(prefix)
     p .. "group add <id> key=value ...",
     p .. "group update <id> key=value ...",
     p .. "group remove <id> [force=true]",
+    p .. "screen list",
+    p .. "screen scan",
+    p .. "screen add <id> screen=<address> gpu=<address> [group=<id|*>] [title=...] [pageInterval=10]",
+    p .. "screen update <id> key=value ...",
+    p .. "screen remove <id>",
     p .. "settings key=value ...",
     p .. "discord key=value ...",
     p .. "discord-admin add <userId>",
@@ -283,6 +333,8 @@ function M.helpText(prefix)
     "Discovery prints exact name/damage matchers; item fuzzy search streams results to avoid OC OOM.",
     "Resource fields: display,label,name,damage,min,recover,target,unit,group,trendWindow,minTrendSpan",
     "Group fields: display,webhook,alertWebhook,reportInterval,alertRepeatInterval,mention",
+    "Screen fields: screen,gpu,group,title,enabled,pageInterval",
+    "Use a dedicated GPU for dashboards so the monitor never rebinds the interactive terminal GPU.",
     "Use field=nil to clear an optional field.",
   }, "\n")
 end
@@ -448,6 +500,71 @@ function M.applyCommand(cfg, tokens)
     end
   end
 
+  if cmd == "screen" then
+    local sub, id = tostring(tokens[2] or ""):lower(), tokens[3]
+
+    if sub == "list" then
+      return true, screenListText(cfg), false
+    end
+
+    if sub == "scan" then
+      return true, "Scanning connected screen/GPU components...", false, { screenScan = true }
+    end
+
+    if sub == "add" then
+      if not id or id == "" then return false, "Missing screen id", false end
+      if cfg.screens[id] then return false, "Screen already exists: " .. id, false end
+      local kv, err = parseKV(tokens, 4)
+      if not kv then return false, err, false end
+      local d = {
+        screen = "", gpu = "", group = "*", title = id,
+        enabled = true, pageInterval = 10,
+      }
+      local ok, applyErr = applyKV(d, kv, SCREEN_FIELDS)
+      if not ok then return false, applyErr, false end
+      if d.screen == "" or d.gpu == "" then
+        return false, "screen add requires screen=<address> and gpu=<address>", false
+      end
+      if d.group ~= "*" and not cfg.groups[d.group] then
+        return false, "Unknown group: " .. tostring(d.group), false
+      end
+      if tonumber(d.pageInterval) and tonumber(d.pageInterval) < 1 then
+        return false, "pageInterval must be at least 1 second", false
+      end
+      cfg.screens[id] = d
+      return true, "Added dashboard screen " .. id, true
+    end
+
+    if sub == "update" then
+      local d = id and cfg.screens[id]
+      if not d then return false, "Unknown screen: " .. tostring(id), false end
+      local kv, err = parseKV(tokens, 4)
+      if not kv then return false, err, false end
+      local ok, applyErr = applyKV(d, kv, SCREEN_FIELDS)
+      if not ok then return false, applyErr, false end
+      if not d.screen or d.screen == "" or not d.gpu or d.gpu == "" then
+        return false, "Dashboard screen requires both screen= and gpu=", false
+      end
+      if d.group ~= "*" and not cfg.groups[d.group] then
+        return false, "Unknown group: " .. tostring(d.group), false
+      end
+      if tonumber(d.pageInterval) and tonumber(d.pageInterval) < 1 then
+        return false, "pageInterval must be at least 1 second", false
+      end
+      return true, "Updated dashboard screen " .. id, true
+    end
+
+    if sub == "remove" then
+      if not id or not cfg.screens[id] then
+        return false, "Unknown screen: " .. tostring(id), false
+      end
+      cfg.screens[id] = nil
+      return true, "Removed dashboard screen " .. id, true
+    end
+
+    return false, "Usage: screen <list|scan|add|update|remove> ...", false
+  end
+
   if cmd == "settings" then
     local kv, err = parseKV(tokens, 2)
     if not kv then return false, err, false end
@@ -497,6 +614,67 @@ function M.applyCommand(cfg, tokens)
   end
 
   return false, "Unknown command: " .. cmd .. "\n" .. M.helpText(""), false
+end
+
+----------------------------------------------------------------------
+-- Screen/GPU discovery
+----------------------------------------------------------------------
+
+function M.scanScreens()
+  local component = require("component")
+  local lines = {
+    "Connected OpenComputers display hardware:",
+    "",
+    "Screens:"
+  }
+
+  local primaryGpuAddress = nil
+  local primaryScreenAddress = nil
+  if component.isAvailable("gpu") then
+    local okGpu, primaryGpu = pcall(function() return component.gpu end)
+    if okGpu and primaryGpu then
+      primaryGpuAddress = primaryGpu.address
+      local okScreen, bound = pcall(primaryGpu.getScreen)
+      if okScreen then primaryScreenAddress = bound end
+    end
+  end
+
+  local screenCount = 0
+  for address in component.list("screen") do
+    screenCount = screenCount + 1
+    local keyboardText = ""
+    local proxy = component.proxy(address)
+    if proxy and type(proxy.getKeyboards) == "function" then
+      local ok, keyboards = pcall(proxy.getKeyboards)
+      if ok and type(keyboards) == "table" and #keyboards > 0 then
+        keyboardText = " keyboards=" .. tostring(#keyboards)
+      end
+    end
+    local primary = address == primaryScreenAddress and " [PRIMARY TERMINAL]" or ""
+    lines[#lines + 1] = "  " .. address .. keyboardText .. primary
+  end
+  if screenCount == 0 then lines[#lines + 1] = "  (none)" end
+
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "GPUs:"
+  local gpuCount = 0
+  for address in component.list("gpu") do
+    gpuCount = gpuCount + 1
+    local proxy = component.proxy(address)
+    local bound = "unbound"
+    if proxy and type(proxy.getScreen) == "function" then
+      local ok, value = pcall(proxy.getScreen)
+      if ok and value then bound = tostring(value) end
+    end
+    local primary = address == primaryGpuAddress and " [PRIMARY TERMINAL]" or ""
+    lines[#lines + 1] = "  " .. address .. " bound=" .. bound .. primary
+  end
+  if gpuCount == 0 then lines[#lines + 1] = "  (none)" end
+
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "Use a non-primary GPU for dashboards. One GPU per screen is smoothest;"
+  lines[#lines + 1] = "a single dedicated GPU may be shared by multiple dashboard screens."
+  return table.concat(lines, "\n")
 end
 
 ----------------------------------------------------------------------

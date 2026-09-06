@@ -3,6 +3,7 @@ local computer = require("computer")
 local event = require("event")
 local fs = require("filesystem")
 local serialization = require("serialization")
+local unicode = require("unicode")
 local common = require("resmon_common")
 
 local STATE_PATH = "/var/lib/resmon.state"
@@ -221,6 +222,48 @@ local alertState = {}
 local nextReport = {}
 local lastSnapshot = nil
 local pendingReport = nil
+local snapshotSerial = 0
+local lastDaemonError = nil
+
+----------------------------------------------------------------------
+-- Logging
+----------------------------------------------------------------------
+
+local ERROR_LOG_PATH = "/var/log/resmon.log"
+
+local function joinArgs(...)
+  local parts = {}
+  for i = 1, select("#", ...) do
+    parts[#parts + 1] = tostring(select(i, ...))
+  end
+  return table.concat(parts)
+end
+
+local function consoleLoggingEnabled()
+  return not cfg.settings or cfg.settings.consoleLog ~= false
+end
+
+local function infoLog(...)
+  if consoleLoggingEnabled() then print(joinArgs(...)) end
+end
+
+local function errorLog(...)
+  local message = joinArgs(...)
+  lastDaemonError = message
+
+  -- Always retain daemon errors even when consoleLog=false, so a dedicated
+  -- dashboard can be used without losing diagnostics.
+  ensureParent(ERROR_LOG_PATH)
+  local f = io.open(ERROR_LOG_PATH, "a")
+  if f then
+    f:write(string.format("[%.0fs] %s\n", computer.uptime(), message))
+    f:close()
+  end
+
+  if consoleLoggingEnabled() then
+    io.stderr:write(message, "\n")
+  end
+end
 
 ----------------------------------------------------------------------
 -- Components
@@ -493,6 +536,284 @@ local function resourceLine(row, now)
 end
 
 ----------------------------------------------------------------------
+-- Dedicated dashboard screens
+----------------------------------------------------------------------
+
+local screenRenderState = {}
+local screenLastError = {}
+
+local COLOR_BG = 0x000000
+local COLOR_TEXT = 0xFFFFFF
+local COLOR_HEADER = 0x55FFFF
+local COLOR_OK = 0x55FF55
+local COLOR_LOW = 0xFF5555
+local COLOR_ERR = 0xFFFF55
+local COLOR_DIM = 0xAAAAAA
+
+local function ulen(text)
+  return unicode.len(tostring(text or "")) or 0
+end
+
+local function usub(text, first, last)
+  return unicode.sub(tostring(text or ""), first, last)
+end
+
+local function fitText(text, width)
+  text = tostring(text or "")
+  width = math.max(0, tonumber(width) or 0)
+  if width == 0 then return "" end
+  local len = ulen(text)
+  if len > width then
+    if width <= 3 then return usub(text, 1, width) end
+    return usub(text, 1, width - 3) .. "..."
+  end
+  return text .. string.rep(" ", width - len)
+end
+
+local function resolveComponentAddress(value, expectedType)
+  value = tostring(value or "")
+  if value == "" then return nil, "missing " .. expectedType .. " address" end
+
+  local okType, actualType = pcall(component.type, value)
+  if okType and actualType == expectedType then return value end
+
+  local ok, address = pcall(component.get, value, expectedType)
+  if ok and address then return address end
+  return nil, "could not resolve " .. expectedType .. " address/prefix '" .. value .. "'"
+end
+
+local function dashboardRows(snapshot, dashboard)
+  local rows = {}
+  local group = tostring(dashboard.group or "*")
+  for _, row in ipairs(snapshot or {}) do
+    if group == "*" or tostring(row.resource.group) == group then
+      rows[#rows + 1] = row
+    end
+  end
+
+  -- Put low/error resources first, then preserve a predictable name ordering.
+  table.sort(rows, function(a, b)
+    local function rank(row)
+      if row.error or row.amount == nil then return 0 end
+      if row.resource.min ~= nil and row.amount < tonumber(row.resource.min) then return 1 end
+      return 2
+    end
+    local ar, br = rank(a), rank(b)
+    if ar ~= br then return ar < br end
+    return tostring(displayName(a.resource)):lower() < tostring(displayName(b.resource)):lower()
+  end)
+  return rows
+end
+
+local function dashboardStatus(row)
+  if row.error or row.amount == nil then return "ERR", COLOR_ERR end
+  if row.resource.min ~= nil and row.amount < tonumber(row.resource.min) then
+    return "LOW", COLOR_LOW
+  end
+  return "OK", COLOR_OK
+end
+
+local function dashboardResourceName(row, dashboard)
+  local name = tostring(displayName(row.resource))
+  if tostring(dashboard.group or "*") == "*" then
+    local group = cfg.groups[row.resource.group]
+    local groupName = group and (group.display or row.resource.group) or row.resource.group
+    name = "[" .. tostring(groupName or "?") .. "] " .. name
+  end
+  return name
+end
+
+local function dashboardRowText(row, dashboard, now, width)
+  local status = dashboardStatus(row)
+  local name = dashboardResourceName(row, dashboard)
+  if row.error or row.amount == nil then
+    return status .. " " .. name .. " | " .. tostring(row.error or "query failed")
+  end
+
+  local m = metricsFor(row, now)
+  local amount = humanNumber(row.amount) .. unit(row.resource)
+  local percent = m.percent and string.format("%.1f%%", m.percent) or "--"
+  local rate = "--"
+  if m.rateHour then
+    rate = string.format("%+.2f", m.rateHour) .. unit(row.resource) .. "/h"
+  end
+  local eta = m.eta and humanDuration(m.eta) or "--"
+
+  if width >= 100 then
+    local fixed = 4 + 1 + 12 + 1 + 8 + 1 + 18 + 1 + 10
+    local nameWidth = math.max(12, width - fixed)
+    return string.format(
+      "%-4s %s %12s %8s %18s %10s",
+      status,
+      fitText(name, nameWidth),
+      amount,
+      percent,
+      rate,
+      eta
+    )
+  end
+
+  return status .. " " .. name .. " | " .. amount .. " | " .. percent .. " | " .. rate .. " | " .. eta
+end
+
+local function dashboardTitle(id, dashboard)
+  if dashboard.title and dashboard.title ~= "" then return tostring(dashboard.title) end
+  if dashboard.group and dashboard.group ~= "*" and cfg.groups[dashboard.group] then
+    return tostring(cfg.groups[dashboard.group].display or dashboard.group)
+  end
+  return tostring(cfg.settings.siteName or "GTNH") .. " Resources"
+end
+
+local function reportScreenError(id, message)
+  message = tostring(message)
+  if screenLastError[id] ~= message then
+    screenLastError[id] = message
+    errorLog("Dashboard '", id, "': ", message)
+  end
+end
+
+local function renderDashboard(id, dashboard, snapshot, now, force)
+  if dashboard.enabled == false then return true end
+
+  local screenAddress, screenErr = resolveComponentAddress(dashboard.screen, "screen")
+  if not screenAddress then return nil, screenErr end
+  local gpuAddress, gpuErr = resolveComponentAddress(dashboard.gpu, "gpu")
+  if not gpuAddress then return nil, gpuErr end
+
+  -- One GPU per dashboard keeps each screen continuously bound and prevents
+  -- flicker/clearing during page refreshes. OpenComputers can technically
+  -- rebind one GPU between screens, but a bind clears the target screen.
+  for otherId, other in pairs(cfg.screens or {}) do
+    if otherId ~= id and other and other.enabled ~= false then
+      local otherGpu = resolveComponentAddress(other.gpu, "gpu")
+      if otherGpu and otherGpu == gpuAddress then
+        return nil, "GPU is also assigned to dashboard '" .. tostring(otherId) .. "'; use one dedicated GPU per dashboard"
+      end
+    end
+  end
+
+  -- Never steal the shell's primary GPU. Binding that GPU to another screen
+  -- clears/rebinds the interactive terminal, which is exactly what dashboards
+  -- are intended to avoid.
+  if component.isAvailable("gpu") and component.gpu and gpuAddress == component.gpu.address then
+    return nil,
+      "configured GPU is the primary terminal GPU; install/use a second GPU for dashboards"
+  end
+
+  local gpu = component.proxy(gpuAddress)
+  local screen = component.proxy(screenAddress)
+  if not gpu or not screen then return nil, "screen or GPU proxy is unavailable" end
+
+  if type(screen.turnOn) == "function" then pcall(screen.turnOn) end
+
+  local okBound, currentScreen = pcall(gpu.getScreen)
+  if not okBound or currentScreen ~= screenAddress then
+    local ok, reason = gpu.bind(screenAddress, true)
+    if not ok then return nil, "GPU bind failed: " .. tostring(reason) end
+    force = true
+  end
+
+  local okMax, maxW, maxH = pcall(gpu.maxResolution)
+  if not okMax or not maxW or not maxH then return nil, "could not read screen resolution" end
+
+  local okRes, currentW, currentH = pcall(gpu.getResolution)
+  if not okRes or currentW ~= maxW or currentH ~= maxH then
+    local ok, reason = gpu.setResolution(maxW, maxH)
+    if not ok then return nil, "could not set screen resolution: " .. tostring(reason) end
+    force = true
+  end
+
+  local width, height = maxW, maxH
+  local rows = dashboardRows(snapshot, dashboard)
+  local capacity = math.max(1, height - 4)
+  local totalPages = math.max(1, math.ceil(math.max(1, #rows) / capacity))
+  local pageInterval = math.max(1, tonumber(dashboard.pageInterval) or 10)
+  local page = totalPages > 1 and ((math.floor(now / pageInterval) % totalPages) + 1) or 1
+
+  local previous = screenRenderState[id]
+  if not force and previous and
+      previous.page == page and
+      previous.serial == snapshotSerial and
+      previous.revision == tonumber(cfg.revision) then
+    return true
+  end
+
+  screenRenderState[id] = {
+    page = page,
+    serial = snapshotSerial,
+    revision = tonumber(cfg.revision),
+  }
+  screenLastError[id] = nil
+
+  pcall(gpu.setBackground, COLOR_BG)
+  pcall(gpu.setForeground, COLOR_TEXT)
+  gpu.fill(1, 1, width, height, " ")
+
+  pcall(gpu.setForeground, COLOR_HEADER)
+  gpu.set(1, 1, fitText(
+    tostring(cfg.settings.siteName or "GTNH") .. " - " .. dashboardTitle(id, dashboard),
+    width
+  ))
+
+  pcall(gpu.setForeground, COLOR_DIM)
+  if width >= 100 then
+    gpu.set(1, 2, fitText("STAT RESOURCE / GROUP                           AMOUNT        %             RATE/H        ETA", width))
+  else
+    gpu.set(1, 2, fitText("STAT RESOURCE | AMOUNT | % | RATE/H | ETA", width))
+  end
+
+  if not snapshot then
+    pcall(gpu.setForeground, COLOR_TEXT)
+    gpu.set(1, 3, fitText("Waiting for first AE sample...", width))
+  elseif #rows == 0 then
+    pcall(gpu.setForeground, COLOR_TEXT)
+    gpu.set(1, 3, fitText("No monitored resources match this dashboard.", width))
+  else
+    local first = (page - 1) * capacity + 1
+    local last = math.min(#rows, first + capacity - 1)
+    local y = 3
+    for index = first, last do
+      local row = rows[index]
+      local _, color = dashboardStatus(row)
+      pcall(gpu.setForeground, color)
+      gpu.set(1, y, fitText(dashboardRowText(row, dashboard, now, width), width))
+      y = y + 1
+    end
+  end
+
+  pcall(gpu.setForeground, COLOR_DIM)
+  local footer = string.format(
+    "page %d/%d | %d resources | uptime %.0fs",
+    page, totalPages, #rows, now
+  )
+  if lastDaemonError and lastDaemonError ~= "" then
+    footer = footer .. " | last error: " .. lastDaemonError
+  end
+  gpu.set(1, height, fitText(footer, width))
+  pcall(gpu.setForeground, COLOR_TEXT)
+
+  return true
+end
+
+local function renderScreens(snapshot, now, force)
+  local ids = {}
+  for id in pairs(cfg.screens or {}) do ids[#ids + 1] = id end
+  table.sort(ids)
+
+  for _, id in ipairs(ids) do
+    local dashboard = cfg.screens[id]
+    if dashboard and dashboard.enabled ~= false then
+      local callOk, result, reason = pcall(renderDashboard, id, dashboard, snapshot, now, force)
+      if not callOk then
+        reportScreenError(id, result)
+      elseif not result then
+        reportScreenError(id, reason or "unknown rendering error")
+      end
+    end
+  end
+end
+
+----------------------------------------------------------------------
 -- AE queries
 ----------------------------------------------------------------------
 
@@ -624,7 +945,7 @@ local function processAlerts(snapshot, now)
       if bucket.ping and g.mention and g.mention ~= "" then table.insert(lines, 1, g.mention) end
       for _, line in ipairs(bucket.lines) do lines[#lines + 1] = line end
       local ok, err = sendWebhookChunked(webhook, table.concat(lines, "\n"))
-      if not ok then io.stderr:write("Alert send failed for ", groupId, ": ", tostring(err), "\n") end
+      if not ok then errorLog("Alert send failed for ", groupId, ": ", tostring(err)) end
     end
   end
 end
@@ -637,11 +958,11 @@ local function sendRequestedReports(which, now)
   if which == "*" or which == nil then
     for groupId in pairs(cfg.groups or {}) do
       local ok, err = sendGroupReport(groupId, lastSnapshot, now)
-      if not ok then io.stderr:write("Report failed for ", groupId, ": ", tostring(err), "\n") end
+      if not ok then errorLog("Report failed for ", groupId, ": ", tostring(err)) end
     end
   else
     local ok, err = sendGroupReport(which, lastSnapshot, now)
-    if not ok then io.stderr:write("Report failed for ", tostring(which), ": ", tostring(err), "\n") end
+    if not ok then errorLog("Report failed for ", tostring(which), ": ", tostring(err)) end
   end
 end
 
@@ -668,7 +989,7 @@ local function initializeDiscordCursor()
   if state.discordLastMessageId and state.discordLastMessageId ~= "" then return end
   local messages, err = botApi("GET", "/channels/" .. d.adminChannelId .. "/messages?limit=1")
   if not messages then
-    io.stderr:write("Discord cursor init failed: ", tostring(err), "\n")
+    errorLog("Discord cursor init failed: ", tostring(err))
     return
   end
   if type(messages) == "table" and messages[1] and messages[1].id then
@@ -697,31 +1018,41 @@ local function handleDiscordCommand(message, now)
     -- value; reload the persisted config to keep failed commands transactional.
     local fresh = common.loadConfig()
     if fresh then cfg = fresh end
-    botReply("F - " .. msg)
+    botReply("❌ " .. msg)
     return
   end
 
   if changed then
     local saved, saveErr = common.saveConfig(cfg)
     if not saved then
-      botReply("F - Could not save config: " .. tostring(saveErr))
+      botReply("❌ Could not save config: " .. tostring(saveErr))
       local fresh = common.loadConfig()
       if fresh then cfg = fresh end
       return
     end
   end
 
-  if action and action.discovery then
-    local text, discoveryErr = common.performDiscovery(me, action.discovery)
+  if action and action.screenScan then
+    local text, scanErr = common.scanScreens()
     if not text then
-      botReply("F - AE discovery failed: " .. tostring(discoveryErr))
+      botReply("❌ Display scan failed: " .. tostring(scanErr))
     else
       botReply(text)
     end
     return
   end
 
-  botReply("G - " .. msg)
+  if action and action.discovery then
+    local text, discoveryErr = common.performDiscovery(me, action.discovery)
+    if not text then
+      botReply("❌ AE discovery failed: " .. tostring(discoveryErr))
+    else
+      botReply(text)
+    end
+    return
+  end
+
+  botReply("✅ " .. msg)
   if action and action.report then sendRequestedReports(action.report, now) end
 end
 
@@ -735,7 +1066,7 @@ local function pollDiscord(now)
   end
   local messages, err = botApi("GET", path)
   if not messages then
-    io.stderr:write("Discord command poll failed: ", tostring(err), "\n")
+    errorLog("Discord command poll failed: ", tostring(err))
     return
   end
   if type(messages) ~= "table" then return end
@@ -768,14 +1099,14 @@ end
 local function reloadConfigIfChanged()
   local fresh, err = common.loadConfig()
   if not fresh then
-    io.stderr:write("Config reload failed: ", tostring(err), "\n")
+    errorLog("Config reload failed: ", tostring(err))
     return false
   end
   if tonumber(fresh.revision) ~= tonumber(cfg.revision) then
     local oldME = tostring(cfg.settings.meAddress or "")
     cfg = fresh
     if tostring(cfg.settings.meAddress or "") ~= oldME then me = getME() end
-    print("Reloaded config revision " .. tostring(cfg.revision))
+    infoLog("Reloaded config revision ", tostring(cfg.revision))
     return true
   end
   return false
@@ -790,9 +1121,9 @@ local function checkTerminalReportRequest(now)
   sendRequestedReports((which and which ~= "") and which or "*", now)
 end
 
-print("GTNH Resource Monitor v2")
-print("Config: " .. common.CONFIG_PATH)
-print("Ctrl+C to stop. resmonctl changes hot-reload automatically.")
+infoLog("GTNH Resource Monitor v2")
+infoLog("Config: ", common.CONFIG_PATH)
+infoLog("Ctrl+C to stop. resmonctl changes hot-reload automatically.")
 
 local now = computer.uptime()
 initializeReportSchedule(now)
@@ -801,6 +1132,10 @@ initializeDiscordCursor()
 local nextAEPoll = now
 local nextConfigReload = now + (tonumber(cfg.settings.configReloadInterval) or 5)
 local nextDiscordPoll = now + 1
+local nextScreenTick = now
+
+-- Dashboard screens are useful immediately, even before the first AE poll.
+renderScreens(nil, now, true)
 
 while true do
   now = computer.uptime()
@@ -809,8 +1144,9 @@ while true do
   if now >= nextConfigReload then
     if reloadConfigIfChanged() then
       -- New/updated resources are sampled immediately rather than waiting for
-      -- the old polling deadline.
+      -- the old polling deadline. Screen configuration also hot-reloads.
       nextAEPoll = now
+      renderScreens(lastSnapshot, now, true)
     end
     nextConfigReload = now + (tonumber(cfg.settings.configReloadInterval) or 5)
   end
@@ -819,18 +1155,27 @@ while true do
 
   if now >= nextAEPoll then
     lastSnapshot = readSnapshot(now)
+    snapshotSerial = snapshotSerial + 1
     processAlerts(lastSnapshot, now)
 
     for id, g in pairs(cfg.groups or {}) do
       if now >= (nextReport[id] or now) then
         local ok, err = sendGroupReport(id, lastSnapshot, now)
-        if not ok then io.stderr:write("Report failed for ", id, ": ", tostring(err), "\n") end
+        if not ok then errorLog("Report failed for ", id, ": ", tostring(err)) end
         nextReport[id] = now + (tonumber(g.reportInterval) or 1800)
       end
     end
 
     nextAEPoll = now + (tonumber(cfg.settings.pollInterval) or 60)
-    print(string.format("[%.0fs] AE resource check complete (%d resources)", now, #(cfg.resources or {})))
+    renderScreens(lastSnapshot, now, true)
+    infoLog(string.format("[%.0fs] AE resource check complete (%d resources)", now, #(cfg.resources or {})))
+  end
+
+  -- Tick once per second for automatic dashboard pagination. renderScreens is
+  -- cheap when neither the page nor the AE snapshot has changed.
+  if now >= nextScreenTick then
+    renderScreens(lastSnapshot, now, false)
+    nextScreenTick = now + 1
   end
 
   local d = cfg.settings.discord or {}

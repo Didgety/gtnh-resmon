@@ -1,4 +1,9 @@
 local fs = require("filesystem")
+
+-- OpenOS child processes inherit the shell's package.loaded cache. Force the
+-- shared command/config module to reload so an in-place update is visible
+-- immediately without rebooting the computer.
+package.loaded["resmon_common"] = nil
 local common = require("resmon_common")
 
 local args = {...}
@@ -41,6 +46,16 @@ if changed then
     io.stderr:write("Could not save config: ", tostring(saveErr), "\n")
     return
   end
+end
+
+if action and action.screenScan then
+  local text, scanErr = common.scanScreens()
+  if not text then
+    io.stderr:write("Display scan failed: ", tostring(scanErr), "\n")
+    return
+  end
+  print(text)
+  return
 end
 
 if action and action.discovery then
