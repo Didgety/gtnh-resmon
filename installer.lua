@@ -19,7 +19,7 @@ local action = args[1] or "install"
 local DEFAULT_REPOSITORY = "Didgety/gtnh-resmon"
 local ARCHIVE_NAME = "GTNHResourceMonitor.tar"
 
-local TAR_URL = "https://raw.githubusercontent.com/Navatusein/GTNH-OC-Installer/refs/heads/main/tar/tar.lua"
+local TAR_URL = "https://raw.githubusercontent.com/mpmxyz/ocprograms/refs/heads/master/home/bin/tar.lua"
 
 local function fail(message)
   io.stderr:write("resmon installer: ", tostring(message), "\n")
