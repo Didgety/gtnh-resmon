@@ -19,6 +19,7 @@ local args, options = shell.parse(...)
 local action = args[1] or "install"
 
 local PROGRAM_FILES = {
+  { source = "VERSION",               destination = "/usr/share/resmon/VERSION" },
   { source = "src/resmon.lua",        destination = "/usr/bin/resmon.lua" },
   { source = "src/resmonctl.lua",     destination = "/usr/bin/resmonctl.lua" },
   { source = "src/resmon_common.lua", destination = "/usr/lib/resmon_common.lua" },
