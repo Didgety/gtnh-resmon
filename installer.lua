@@ -65,10 +65,12 @@ if not component.isAvailable("internet") then
 end
 
 local repository = options.repo or DEFAULT_REPOSITORY
-if repository == DEFAULT_REPOSITORY or not repository:match("^[%w%._%-]+/[%w%._%-]+$") then
+
+if not repository:match("^[%w%._%-]+/[%w%._%-]+$") then
   return fail(
-    "GitHub repository is not configured. Edit DEFAULT_REPOSITORY in installer.lua/pastebin.lua " ..
-    "or run with --repo=owner/repository"
+    "invalid GitHub repository '" ..
+    tostring(repository) ..
+    "' (expected owner/repository)"
   )
 end
 
