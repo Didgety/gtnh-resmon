@@ -65,7 +65,6 @@ if not component.isAvailable("internet") then
 end
 
 local repository = options.repo or DEFAULT_REPOSITORY
-
 if not repository:match("^[%w%._%-]+/[%w%._%-]+$") then
   return fail(
     "invalid GitHub repository '" ..
@@ -154,19 +153,49 @@ local function main()
     tarCommand = tarPath
   end
 
-  print("Extracting release ...")
-  local extracted, extractReason =
-    execute(
-      tarCommand,
-      "--dir=" .. extractDir,
-      "-xf",
-      archivePath
-    )
-  if not extracted then return nil, "could not extract release: " .. tostring(extractReason) end
+print("Extracting release ...")
+
+  -- Do not rely on changing PWD before launching tar. OpenOS child processes
+  -- do not always observe a PWD change the way we expect, while this tar
+  -- implementation supports an explicit --dir option.
+  local extracted, extractReason = execute(
+    tarCommand,
+    "--dir=" .. extractDir,
+    -- "-xf",
+    "-xfv", -- debug verbosity
+    archivePath
+  )
+  if not extracted then
+    return nil, "could not extract release: " .. tostring(extractReason)
+  end
 
   local setupPath = fs.concat(extractDir, "setup.lua")
+
+  -- Some tar producers may wrap the release in one top-level directory.
+  -- Accept that layout too, but reject anything more ambiguous.
   if not fs.exists(setupPath) then
-    return nil, "release archive is invalid: setup.lua is missing"
+    local candidate = nil
+    for name in fs.list(extractDir) do
+      local child = fs.concat(extractDir, name)
+      if fs.isDirectory(child) then
+        local nestedSetup = fs.concat(child, "setup.lua")
+        if fs.exists(nestedSetup) then
+          if candidate then
+            return nil, "release archive is ambiguous: multiple setup.lua candidates found"
+          end
+          candidate = nestedSetup
+        end
+      end
+    end
+
+    if candidate then
+      setupPath = candidate
+      extractDir = fs.path(candidate)
+    else
+      return nil,
+        "release archive extraction completed, but setup.lua was not found under " ..
+        tostring(extractDir)
+    end
   end
 
   local setupArgs = { action }
