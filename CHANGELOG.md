@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.6.0 - dashboards and Discord embed reporting
+
+- Added multi-screen OpenComputers dashboards with per-screen group filtering and paging.
+- Added updated `find` to avoid unfiltered `getItemsInNetwork()` on large GTNH AE networks.
+- Added Discord embed reports and alerts with status-colored borders.
+- Added optional per-group target progress bars (`progressBar`, `progressWidth`).
+- Added `reportStyle=embed|text`; embed is now the default while legacy text reports remain available.
+- Added automatic embed pagination within Discord field/character limits.
+- Moved network-installer staging from OpenOS `/tmp` to on-disk `/var/tmp`.
+- Preserved hot-reload behavior for reporting/group changes and resource configuration.
+
 ## 2.5.2
 
 - Reduced OC RAM usage of `find item`.

@@ -7,6 +7,7 @@ An OpenComputers/OpenOS daemon for **GregTech: New Horizons** that monitors sele
 - One main AE2 network view through an OC Adapter + ME Interface.
 - Arbitrary item/fluid resources grouped into logical reporting groups.
 - Separate Discord report and alert webhooks per group.
+- Discord embed reports/alerts with status colors and optional target progress bars.
 - Low-resource thresholds, hysteresis/recovery thresholds, and repeat alerts.
 - Percentage-of-target reporting.
 - Rolling rate-of-change and estimated depletion time.
@@ -20,19 +21,19 @@ An OpenComputers/OpenOS daemon for **GregTech: New Horizons** that monitors sele
 ## Recommended installation: Pastebin bootstrap
 
 ```sh
-pastebin run PrHfkG7N --enable --start
+pastebin run 3AdeDzpY --enable --start
 ```
 
 Update an existing installation to the latest GitHub Release and restart it:
 
 ```sh
-pastebin run PrHfkG7N update --restart
+pastebin run 3AdeDzpY update --restart
 ```
 
 Install a specific release:
 
 ```sh
-pastebin run PrHfkG7N --tag=v2.5.2
+pastebin run 3AdeDzpY --tag=v2.6.0
 ```
 
 The Pastebin code is deliberately tiny. It downloads the current `installer.lua` from the
@@ -45,6 +46,15 @@ Normal install/update operations preserve:
 ```text
 /etc/resmon.cfg
 /var/lib/resmon.state
+```
+
+### Publishing a release
+
+Pushing a tag matching `v*` runs `.github/workflows/release.yml`, creates the GitHub Release, and also attaches `GTNHResourceMonitor.tar` as a convenient downloadable package. The network installer only needs the release/tag itself and downloads the tagged source files directly.
+
+```sh
+git tag v2.6.0
+git push origin v2.6.0
 ```
 
 ### Direct GitHub fallback
@@ -118,6 +128,44 @@ resmonctl group add chemistry \
   webhook="https://discord.com/api/webhooks/REPORT_WEBHOOK" \
   alertWebhook="https://discord.com/api/webhooks/ALERT_WEBHOOK" \
   reportInterval=1800
+```
+
+### Discord embed reports and progress bars
+
+`v2.6.0+` uses Discord embeds by default for both routine group reports and low/recovery alerts. Each resource gets a clean field with its current amount, target percentage, rolling rate, and depletion ETA. The embed border changes with group state (green normally, red when something is low, yellow on query errors).
+
+A group can optionally show a compact percentage bar based on the resource `target` (or `min` when `target` is unset):
+
+```sh
+resmonctl group update chemistry progressBar=true progressWidth=12
+```
+
+Example field:
+
+```text
+🟢 Soldering Alloy
+18.4M L / 25M L  •  73.6%
+█████████░░░  73.6%
+Trend: -420k L/h  (-1.7%/h)
+Depletion ETA: ~1d 19h
+```
+
+`progressWidth` is clamped to 5–30 characters. Disable the bar while keeping embeds:
+
+```sh
+resmonctl group update chemistry progressBar=false
+```
+
+For the old plain-text Discord format:
+
+```sh
+resmonctl group update chemistry reportStyle=text
+```
+
+Switch back to embeds at any time without restarting the daemon:
+
+```sh
+resmonctl group update chemistry reportStyle=embed
 ```
 
 ### Discovering exact item and fluid identifiers
