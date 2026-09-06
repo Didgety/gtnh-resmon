@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.5.2
+
+- Reduced OC RAM usage of `find item`.
+- Added multi screen support via `resmonctl screen`
+
 ## 2.5.1
 
 - Added find \[item / fluid\] to easily identify resources in network.

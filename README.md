@@ -13,6 +13,7 @@ An OpenComputers/OpenOS daemon for **GregTech: New Horizons** that monitors sele
 - Hot-reloaded persistent configuration: add/remove/update resources without restarting.
 - Terminal administration with `resmonctl`.
 - Live AE discovery commands for exact item registry names/meta and fluid names.
+- Multiple dedicated OC dashboard screens, with per-screen group filtering and automatic paging.
 - Optional Discord administration using a bot in a private admin channel.
 - Native OpenOS `rc` service for autostart.
 
@@ -31,7 +32,7 @@ pastebin run PrHfkG7N update --restart
 Install a specific release:
 
 ```sh
-pastebin run PrHfkG7N --tag=v2.4.0
+pastebin run PrHfkG7N --tag=v2.5.2
 ```
 
 The Pastebin code is deliberately tiny. It downloads the current `installer.lua` from the
@@ -196,6 +197,94 @@ Request an immediate Discord report:
 resmonctl report
 resmonctl report chemistry
 ```
+
+## Multiple dashboard screens
+
+The monitor can drive one or more **dedicated OpenComputers screens** without taking over the interactive OpenOS terminal. Each dashboard can show all monitored resources or only one resource group. Low/error resources are sorted to the top, and large resource sets automatically paginate.
+
+OpenComputers binds a GPU to one screen at a time. For a stable multi-screen setup, use **one dedicated GPU per dashboard screen** in addition to the GPU used by the terminal. The monitor deliberately refuses to bind the primary terminal GPU so a daemon refresh cannot erase or redirect shell input/output.
+
+First discover the connected component addresses:
+
+```sh
+resmonctl screen scan
+```
+
+Example output identifies the GPU/screen pair currently used by the terminal:
+
+```text
+Screens:
+  12ab... keyboards=1 [PRIMARY TERMINAL]
+  34cd...
+  56ef...
+
+GPUs:
+  78ab... bound=12ab... [PRIMARY TERMINAL]
+  90cd... bound=unbound
+  ab12... bound=unbound
+```
+
+Create an overview dashboard on the first secondary GPU/screen:
+
+```sh
+resmonctl screen add overview \
+  screen=34cd \
+  gpu=90cd \
+  group=* \
+  title="Main Base Resources" \
+  pageInterval=10
+```
+
+Create a second dashboard that only shows the `chemistry` group:
+
+```sh
+resmonctl screen add chemistry_display \
+  screen=56ef \
+  gpu=ab12 \
+  group=chemistry \
+  title="Chemistry" \
+  pageInterval=8
+```
+
+Short unique component-address prefixes are accepted, so you normally do not need to type the full UUID. Screen configuration hot-reloads like resource configuration.
+
+List configured dashboards:
+
+```sh
+resmonctl screen list
+```
+
+Change a dashboard without restarting the daemon:
+
+```sh
+resmonctl screen update overview group=default title="Critical Resources"
+```
+
+Temporarily disable one:
+
+```sh
+resmonctl screen update overview enabled=false
+```
+
+Remove it:
+
+```sh
+resmonctl screen remove overview
+```
+
+Once a dedicated dashboard is working, suppress routine daemon output on the interactive terminal:
+
+```sh
+resmonctl settings consoleLog=false
+```
+
+With `consoleLog=false`, runtime errors are still appended to:
+
+```text
+/var/log/resmon.log
+```
+
+The same screen-management commands can be issued from the configured Discord admin channel, e.g. `!res screen list` and `!res screen scan`.
 
 ## Starting and autostart
 
