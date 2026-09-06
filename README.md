@@ -12,6 +12,7 @@ An OpenComputers/OpenOS daemon for **GregTech: New Horizons** that monitors sele
 - Rolling rate-of-change and estimated depletion time.
 - Hot-reloaded persistent configuration: add/remove/update resources without restarting.
 - Terminal administration with `resmonctl`.
+- Live AE discovery commands for exact item registry names/meta and fluid names.
 - Optional Discord administration using a bot in a private admin channel.
 - Native OpenOS `rc` service for autostart.
 
@@ -116,6 +117,48 @@ resmonctl group add chemistry \
   webhook="https://discord.com/api/webhooks/REPORT_WEBHOOK" \
   alertWebhook="https://discord.com/api/webhooks/ALERT_WEBHOOK" \
   reportInterval=1800
+```
+
+### Discovering exact item and fluid identifiers
+
+For GTNH metaitems and fluids, prefer the identifiers reported by the live AE network rather than guessing from WAILA/WDMla text. Discovery is on-demand and does not change the monitor configuration.
+
+Search items by any substring of their display label, registry name, or damage/meta:
+
+```sh
+resmonctl find item "soldering"
+resmonctl find item "circuit" limit=50
+```
+
+Search actual AE fluids:
+
+```sh
+resmonctl find fluid "solder"
+resmonctl find fluid "naquadah"
+```
+
+Each result prints the exact matcher and a ready-to-edit `resmonctl add ...` template. For items the recommended matcher is `name` + `damage`; for fluids it is the actual fluid `name`.
+
+Once you know an internal name, inspect it exactly:
+
+```sh
+resmonctl inspect item gregtech:gt.metaitem.01 1234
+resmonctl inspect fluid molten.solderingalloy
+```
+
+Use `*` to enumerate resources (normally use a limit because GTNH networks can contain many entries):
+
+```sh
+resmonctl find item "*" limit=25
+resmonctl find fluid "*" limit=25
+```
+
+The same commands are available through Discord administration, for example:
+
+```text
+!res find item "soldering"
+!res find fluid "solder"
+!res inspect fluid molten.solderingalloy
 ```
 
 Add an item:

@@ -1,13 +1,17 @@
 # Changelog
 
+## 2.5.1
+
+- Added find \[item / fluid\] to easily identify resources in network.
+
 ## 2.5.0
 
-- Remove tar utility dependency
+- Remove tar utility dependency.
 
 ## 2.4.2
 
-- Fixes a bug in tar extraction
-- Update repo checks to validate format
+- Fixes a bug in tar extraction.
+- Update repo checks to validate format.
 
 ## 2.4.1
 
