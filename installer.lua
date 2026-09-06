@@ -1,13 +1,21 @@
 -- GTNH OpenComputers Resource Monitor network installer.
 --
--- Normally invoked through the tiny Pastebin bootstrap in pastebin.lua:
+-- Pastebin bootstrap usage:
 --   pastebin run <PASTE_ID>
 --   pastebin run <PASTE_ID> --enable --start
 --   pastebin run <PASTE_ID> update --restart
 --
--- The installer downloads a GitHub Release archive into /tmp, extracts it,
--- and delegates the actual installation to setup.lua. Persistent config and
--- runtime state remain managed by setup.lua and are preserved on updates.
+-- This installer deliberately avoids GitHub Release asset archives. OpenOS
+-- wget + GitHub's release-asset redirect can produce an apparently successful
+-- download that is empty/unusable on some GTNH/OpenComputers setups.
+--
+-- Instead:
+--   1. Resolve the latest GitHub release tag through the GitHub API.
+--   2. Download the release's source files directly from raw.githubusercontent.
+--   3. Stage them under /tmp.
+--   4. Run the repository's setup.lua from that staging directory.
+--
+-- --tag=<tag> bypasses the latest-release lookup and installs that exact tag.
 
 local component = require("component")
 local fs = require("filesystem")
@@ -17,9 +25,15 @@ local args, options = shell.parse(...)
 local action = args[1] or "install"
 
 local DEFAULT_REPOSITORY = "Didgety/gtnh-resmon"
-local ARCHIVE_NAME = "GTNHResourceMonitor.tar"
 
-local TAR_URL = "https://raw.githubusercontent.com/mpmxyz/ocprograms/refs/heads/master/home/bin/tar.lua"
+local REQUIRED_FILES = {
+  "setup.lua",
+  "VERSION",
+  "src/resmon.lua",
+  "src/resmonctl.lua",
+  "src/resmon_common.lua",
+  "src/resmon_rc.lua",
+}
 
 local function fail(message)
   io.stderr:write("resmon installer: ", tostring(message), "\n")
@@ -39,15 +53,15 @@ Options:
   --start           Start the service after install (also enables it).
   --restart         Restart the service after an update.
   --tag=<tag>       Install a specific GitHub Release tag instead of latest.
-  --repo=<o/r>      Override the GitHub repository compiled into this installer.
-  --keep            Keep downloaded/extracted temporary files for debugging.
+  --repo=<o/r>      Override the GitHub repository.
+  --keep            Keep staged temporary files for debugging.
   --help            Show this help.
 
 Examples:
   installer.lua
   installer.lua --enable --start
   installer.lua update --restart
-  installer.lua --tag=v2.2.0
+  installer.lua --tag=v2.4.1
 ]])
 end
 
@@ -66,15 +80,9 @@ end
 
 local repository = options.repo or DEFAULT_REPOSITORY
 if not repository:match("^[%w%._%-]+/[%w%._%-]+$") then
-  return fail(
-    "invalid GitHub repository '" ..
-    tostring(repository) ..
-    "' (expected owner/repository)"
-  )
+  return fail("invalid GitHub repository '" .. tostring(repository) .. "' (expected owner/repository)")
 end
 
--- /tmp may be writable even when OpenOS is still running from its read-only
--- install floppy. Check the target filesystem before downloading anything.
 local targetFs = fs.get("/usr/bin")
 if not targetFs then
   return fail("could not resolve the OpenOS filesystem")
@@ -84,9 +92,8 @@ if targetFs.isReadOnly and targetFs.isReadOnly() then
 end
 
 local workDir = "/tmp/resmon-installer"
-local archivePath = fs.concat(workDir, ARCHIVE_NAME)
-local tarPath = fs.concat(workDir, "tar.lua")
-local extractDir = fs.concat(workDir, "release")
+local stageDir = fs.concat(workDir, "release")
+local latestJsonPath = fs.concat(workDir, "latest.json")
 local previousCwd = shell.getWorkingDirectory()
 
 local function cleanup()
@@ -106,98 +113,151 @@ local function execute(command, ...)
   return true
 end
 
-local function wget(url, destination)
-  if fs.exists(destination) then fs.remove(destination) end
-  io.write("Downloading ", url, " ... ")
-  local ok, reason = execute("wget", "-fq", url, destination)
-  if not ok or not fs.exists(destination) then
-    print("FAILED")
-    return nil, reason or "download did not create " .. destination
+local function ensureDirectory(path)
+  if fs.exists(path) then
+    if not fs.isDirectory(path) then
+      return nil, path .. " exists but is not a directory"
+    end
+    return true
   end
-  print("ok")
+
+  local ok, reason = fs.makeDirectory(path)
+  if not ok and not fs.isDirectory(path) then
+    return nil, reason or ("could not create " .. path)
+  end
   return true
 end
 
-local function makeReleaseUrl()
-  local base = "https://github.com/" .. repository .. "/releases/"
-  if options.tag and tostring(options.tag) ~= "" then
-    return base .. "download/" .. tostring(options.tag) .. "/" .. ARCHIVE_NAME
+local function readAll(path)
+  local file, reason = io.open(path, "r")
+  if not file then
+    return nil, reason
   end
-  return base .. "latest/download/" .. ARCHIVE_NAME
+  local data = file:read("*a")
+  file:close()
+  return data
+end
+
+local function wget(url, destination)
+  local parent = fs.path(destination)
+  if parent and parent ~= "" then
+    local ok, reason = ensureDirectory(parent)
+    if not ok then
+      return nil, reason
+    end
+  end
+
+  if fs.exists(destination) then
+    fs.remove(destination)
+  end
+
+  io.write("Downloading ", url, " ... ")
+  local ok, reason = execute("wget", "-fq", url, destination)
+
+  if not ok or not fs.exists(destination) then
+    print("FAILED")
+    return nil, reason or ("download did not create " .. destination)
+  end
+
+  local size = fs.size(destination) or 0
+  if size <= 0 then
+    print("FAILED")
+    fs.remove(destination)
+    return nil, "downloaded file was empty"
+  end
+
+  print("ok (", tostring(size), " bytes)")
+  return true
+end
+
+local function resolveTag()
+  if options.tag and tostring(options.tag) ~= "" then
+    return tostring(options.tag)
+  end
+
+  local apiUrl =
+    "https://api.github.com/repos/" ..
+    repository ..
+    "/releases/latest"
+
+  local ok, reason = wget(apiUrl, latestJsonPath)
+  if not ok then
+    return nil, "could not resolve latest GitHub release: " .. tostring(reason)
+  end
+
+  local json, readReason = readAll(latestJsonPath)
+  if not json then
+    return nil, "could not read latest-release metadata: " .. tostring(readReason)
+  end
+
+  local tag = json:match('"tag_name"%s*:%s*"([^"]+)"')
+  if not tag or tag == "" then
+    return nil, "GitHub latest-release response did not contain tag_name"
+  end
+
+  return tag
+end
+
+local function rawUrl(tag, path)
+  return
+    "https://raw.githubusercontent.com/" ..
+    repository ..
+    "/" ..
+    tag ..
+    "/" ..
+    path
+end
+
+local function stageRelease(tag)
+  for _, relative in ipairs(REQUIRED_FILES) do
+    local destination = fs.concat(stageDir, relative)
+    local ok, reason = wget(rawUrl(tag, relative), destination)
+    if not ok then
+      return nil,
+        "could not stage " ..
+        relative ..
+        " from tag " ..
+        tostring(tag) ..
+        ": " ..
+        tostring(reason)
+    end
+  end
+
+  return true
 end
 
 local function main()
   shell.execute("rm -rf " .. workDir)
-  local ok, reason = fs.makeDirectory(workDir)
-  if not ok and not fs.isDirectory(workDir) then
-    return nil, reason or "could not create temporary directory"
-  end
-  ok, reason = fs.makeDirectory(extractDir)
-  if not ok and not fs.isDirectory(extractDir) then
-    return nil, reason or "could not create extraction directory"
+
+  local ok, reason = ensureDirectory(workDir)
+  if not ok then
+    return nil, reason
   end
 
-  local downloaded, downloadReason = wget(makeReleaseUrl(), archivePath)
-  if not downloaded then
-    return nil,
-      "could not download the release archive: " .. tostring(downloadReason) ..
-      "\nMake sure the repository has a tagged GitHub Release containing " .. ARCHIVE_NAME
+  ok, reason = ensureDirectory(stageDir)
+  if not ok then
+    return nil, reason
   end
 
-  local tarCommand
-  if fs.exists("/bin/tar.lua") then
-    tarCommand = "tar"
-  else
-    local tarOk, tarReason = wget(TAR_URL, tarPath)
-    if not tarOk then return nil, "could not obtain tar utility: " .. tostring(tarReason) end
-    tarCommand = tarPath
+  local tag, tagReason = resolveTag()
+  if not tag then
+    return nil, tagReason
   end
 
-print("Extracting release ...")
+  print("Resolved release: " .. tag)
 
-  -- Do not rely on changing PWD before launching tar. OpenOS child processes
-  -- do not always observe a PWD change the way we expect, while this tar
-  -- implementation supports an explicit --dir option.
-  local extracted, extractReason = execute(
-    tarCommand,
-    "--dir=" .. extractDir,
-    "-xvf",
-    archivePath
-  )
-  if not extracted then
-    return nil, "could not extract release: " .. tostring(extractReason)
+  local staged, stageReason = stageRelease(tag)
+  if not staged then
+    return nil, stageReason
   end
 
-  local setupPath = fs.concat(extractDir, "setup.lua")
-
-  -- Some tar producers may wrap the release in one top-level directory.
-  -- Accept that layout too, but reject anything more ambiguous.
+  local setupPath = fs.concat(stageDir, "setup.lua")
   if not fs.exists(setupPath) then
-    local candidate = nil
-    for name in fs.list(extractDir) do
-      local child = fs.concat(extractDir, name)
-      if fs.isDirectory(child) then
-        local nestedSetup = fs.concat(child, "setup.lua")
-        if fs.exists(nestedSetup) then
-          if candidate then
-            return nil, "release archive is ambiguous: multiple setup.lua candidates found"
-          end
-          candidate = nestedSetup
-        end
-      end
-    end
-
-    if candidate then
-      setupPath = candidate
-      extractDir = fs.path(candidate)
-    else
-      return nil,
-        "release archive extraction completed, but setup.lua was not found under " ..
-        tostring(extractDir)
-    end
+    return nil, "staging failed: setup.lua is missing"
   end
 
   local setupArgs = { action }
+
   if action == "install" then
     if options.start then
       table.insert(setupArgs, "--enable")
@@ -210,8 +270,11 @@ print("Extracting release ...")
   end
 
   print("Running setup ...")
-  shell.setWorkingDirectory(extractDir)
-  local installed, installReason = shell.execute(setupPath, nil, table.unpack(setupArgs))
+  shell.setWorkingDirectory(stageDir)
+
+  local installed, installReason =
+    shell.execute(setupPath, nil, table.unpack(setupArgs))
+
   if not installed then
     return nil, installReason or "setup.lua failed"
   end
@@ -230,6 +293,7 @@ end
 
 print("")
 print(action == "install" and "Network installation complete." or "Network update complete.")
+
 if action == "install" then
   print("Configure resources with: resmonctl")
   if not options.start then
